@@ -22,10 +22,21 @@ def get_engine() -> Engine:
 def db_session_for_tenant(tenant_id: uuid.UUID) -> Session:
     """Open a session and set the RLS tenant context for its transaction.
 
-    SET LOCAL only applies within the transaction it's issued in, so this must be the
+    Postgres's SET/SET LOCAL grammar does not accept bound parameters -- only literals --
+    so a parameterized SET LOCAL raises a syntax error at the driver level. set_config()
+    is a regular function call and does accept one; its third argument (true) gives it
+    the same transaction-scoped "local" semantics SET LOCAL would have, readable back via
+    current_setting() exactly the same way (see Task 3's RLS policies). This must be the
     first statement executed on the session -- SQLAlchemy's Session begins its transaction
     lazily on first execute(), so this call itself starts it.
     """
     session = SessionLocal()
-    session.execute(text("SET LOCAL app.tenant_id = :tenant_id"), {"tenant_id": str(tenant_id)})
+    try:
+        session.execute(
+            text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+            {"tenant_id": str(tenant_id)},
+        )
+    except Exception:
+        session.close()
+        raise
     return session
