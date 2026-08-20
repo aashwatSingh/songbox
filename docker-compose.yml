@@ -6,7 +6,11 @@ services:
       POSTGRES_PASSWORD: songbox
       POSTGRES_DB: songbox
     ports:
-      - "5432:5432"
+      # 5433, not 5432: this machine also runs a native Windows PostgreSQL 18 service
+      # (postgresql-x64-18) that wins the port-5432 race on the host's IPv4 wildcard,
+      # silently shadowing this container for any localhost/127.0.0.1 client -- 5433
+      # avoids the conflict entirely rather than depending on service start order.
+      - "5433:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:

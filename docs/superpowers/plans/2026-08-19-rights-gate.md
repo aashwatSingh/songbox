@@ -25,6 +25,7 @@ These apply to every task below — copied from `CLAUDE.md` and `docs/superpower
 - This is a Windows dev machine. All commands below use `services/api/.venv/Scripts/python.exe` (not `bin/python`), matching the pattern already established in M0.
 - Every task's final verification step includes `ruff check .` and `mypy app` passing (in addition to the task's own tests), matching the bar `services/api` already holds from M0 — do not commit code that regresses either.
 - Postgres (via `docker-compose.yml`, already running), Redis, and MinIO must be up (`docker compose up -d` from the repo root) before running any test in this plan — all of Tasks 1, 3, 8, 9, 10, 11 hit real Postgres and/or MinIO, not mocks.
+- **Postgres is on host port 5433, not the default 5432.** This machine also runs a native Windows PostgreSQL 18 service that wins the port-5432 race on the host's IPv4 wildcard, silently shadowing the container for any `localhost`/`127.0.0.1` client. `docker-compose.yml` maps `5433:5432` for exactly this reason — every `DATABASE_URL` default in this plan already reflects that.
 
 ---
 
@@ -102,7 +103,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 DATABASE_URL = os.environ.get(
-    "DATABASE_URL", "postgresql+psycopg://songbox:songbox@localhost:5432/songbox"
+    "DATABASE_URL", "postgresql+psycopg://songbox:songbox@localhost:5433/songbox"
 )
 
 _engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -333,7 +334,7 @@ if config.config_file_name is not None:
 
 config.set_main_option(
     "sqlalchemy.url",
-    os.environ.get("DATABASE_URL", "postgresql+psycopg://songbox:songbox@localhost:5432/songbox"),
+    os.environ.get("DATABASE_URL", "postgresql+psycopg://songbox:songbox@localhost:5433/songbox"),
 )
 
 target_metadata = Base.metadata
