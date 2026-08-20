@@ -166,13 +166,17 @@ def confirm_attestation(
         raise HTTPException(status_code=409, detail="confirm-attestation is only valid for lane A")
 
     # rights_declarations rows are immutable -- record the stronger, named-release attestation
-    # as a new row that supersedes the original, never mutate the original in place. This is
-    # evidence for a human reviewer, not a self-service unlock: M1 has no reviewer/admin role
-    # separation yet (the dev auth stub can't tell an uploader from a reviewer), and the
-    # uploader can already read the exact matched_release string off GET /review-queue -- so
-    # no amount of string-matching the submitted release_name against it can be a real
-    # security boundary. track.status is therefore left untouched here; only a human calling
-    # POST /review-queue/{id}/resolve can actually clear a hold.
+    # as an ADDITIONAL row, never mutate the original in place and never repoint
+    # track.rights_declaration_id at this new row. Both matter for the same reason: this is
+    # evidence for a future human reviewer, not a self-service unlock. M1 has no reviewer/admin
+    # role separation yet (the dev auth stub can't tell an uploader from a reviewer, or even
+    # confirm the caller IS the original uploader), and the uploader can already read the exact
+    # matched_release string off GET /review-queue and echo it straight back -- so no amount of
+    # string-matching the submitted release_name could ever be a real security boundary, and
+    # repointing the FK would let any same-tenant caller silently replace the attestation,
+    # uploader identity, and timestamp the reviewer actually sees. track.status is therefore
+    # left untouched here too; only a human calling POST /review-queue/{id}/resolve can clear
+    # a hold, and that endpoint still reads the ORIGINAL declaration via the untouched FK.
     stronger = RightsDeclaration(
         id=uuid.uuid4(),
         tenant_id=identity.tenant_id,
@@ -187,8 +191,5 @@ def confirm_attestation(
         release_name=body.release_name,
     )
     db.add(stronger)
-    db.flush()
-
-    track.rights_declaration_id = stronger.id
 
     return ConfirmAttestationResponse(track_id=track.id, status=track.status)

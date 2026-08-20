@@ -58,18 +58,27 @@ def test_confirm_attestation_records_evidence_but_never_clears_the_hold(tmp_path
     ids = [item["track_id"] for item in queue_response.json()]
     assert track_id in ids
 
-    # Confirm the evidence was actually recorded: a new RightsDeclaration with this
-    # release_name should exist for this track's user.
+    # Confirm the evidence was actually recorded, scoped tightly enough that this can't pass
+    # vacuously off unrelated rows: this test's own tenant (HEADERS is a fresh random UUID
+    # per test process) plus this exact release_name, which no other test in this file uses.
+    tenant_id = uuid.UUID(HEADERS["X-Dev-Tenant-Id"])
+    user_id = uuid.UUID(HEADERS["X-Dev-User-Id"])
     session = SessionLocal()
     try:
         rows = (
             session.query(RightsDeclaration)
-            .filter(RightsDeclaration.release_name == exact_title)
+            .filter(
+                RightsDeclaration.tenant_id == tenant_id,
+                RightsDeclaration.release_name == exact_title,
+            )
             .all()
         )
     finally:
         session.close()
-    assert any(str(r.id) for r in rows), "expected the stronger attestation to be persisted"
+    assert len(rows) == 1, f"expected exactly one stronger attestation, found {len(rows)}"
+    assert rows[0].user_id == user_id
+    assert rows[0].lane == "A"
+    assert exact_title in rows[0].attestation_text
 
 
 def test_confirm_attestation_with_trivial_one_character_release_name_still_does_not_pass(
@@ -129,11 +138,12 @@ def test_confirm_attestation_then_human_resolve_actually_clears_the_hold(tmp_pat
             )
         track_id = upload_response.json()["track_id"]
 
-        client.post(
+        confirm_response = client.post(
             f"/tracks/{track_id}/confirm-attestation",
             headers=HEADERS,
             json={"release_name": "My Own Unreleased Demo, Actually The Matched Release"},
         )
+        assert confirm_response.status_code == 200
 
         resolve_response = client.post(
             f"/review-queue/{track_id}/resolve", headers=HEADERS, json={"approve": True}
