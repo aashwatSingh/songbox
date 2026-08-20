@@ -7,13 +7,14 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.acoustid.client import AcoustIDClient, HTTPAcoustIDClient
 from app.auth import Identity, get_identity
 from app.db import get_db
 from app.fingerprint import FingerprintError, fingerprint_audio
-from app.gate import resolve_lane_outcome
+from app.gate import FingerprintResolution, resolve_lane_outcome
 from app.models import FingerprintMatch, License, RightsDeclaration, Track
 from app.storage import get_minio_client, save_track_file
 
@@ -124,3 +125,65 @@ def upload_track(
     db.add(match_row)
 
     return UploadResponse(track_id=track.id, status=track.status, reason=decision.reason)
+
+
+class ConfirmAttestationRequest(BaseModel):
+    release_name: str
+
+
+class ConfirmAttestationResponse(BaseModel):
+    track_id: uuid.UUID
+    status: str
+
+
+@router.post("/tracks/{track_id}/confirm-attestation", response_model=ConfirmAttestationResponse)
+def confirm_attestation(
+    track_id: uuid.UUID,
+    body: ConfirmAttestationRequest,
+    identity: Identity = Depends(get_identity),
+    db: Session = Depends(get_db),
+) -> ConfirmAttestationResponse:
+    track = db.get(Track, track_id)
+    if track is None or track.tenant_id != identity.tenant_id:
+        raise HTTPException(status_code=404, detail="track not found")
+    if track.status != "pending_review":
+        raise HTTPException(
+            status_code=409, detail=f"track is not pending review (status={track.status})"
+        )
+
+    declaration = db.get(RightsDeclaration, track.rights_declaration_id)
+    if declaration is None or declaration.lane != "A":
+        raise HTTPException(status_code=409, detail="confirm-attestation is only valid for lane A")
+
+    match_stmt = (
+        select(FingerprintMatch)
+        .where(FingerprintMatch.track_id == track.id)
+        .order_by(FingerprintMatch.id.desc())
+    )
+    match_row = db.execute(match_stmt).scalars().first()
+    if match_row is not None:
+        match_row.resolution = FingerprintResolution.CONFIRMED.value
+        match_row.reviewer_id = identity.user_id
+
+    # rights_declarations rows are immutable -- record the stronger attestation as a new
+    # row that supersedes the original, never mutate the original in place.
+    stronger = RightsDeclaration(
+        id=uuid.uuid4(),
+        tenant_id=identity.tenant_id,
+        user_id=identity.user_id,
+        lane="A",
+        attestation_text=declaration.attestation_text,
+        ip_address=declaration.ip_address,
+        created_at=datetime.now(UTC),
+        release_name=body.release_name,
+    )
+    db.add(stronger)
+    # Same reasoning as Task 9's declaration->track flush: no relationship() mappings means
+    # SQLAlchemy has no dependency-graph guidance ordering this INSERT before the UPDATE below,
+    # which references stronger.id via a real FK column. Flush before the update, not after.
+    db.flush()
+
+    track.status = "passed"
+    track.rights_declaration_id = stronger.id
+
+    return ConfirmAttestationResponse(track_id=track.id, status=track.status)
