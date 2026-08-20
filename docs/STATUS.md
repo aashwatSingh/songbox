@@ -21,8 +21,9 @@ Built across 11 tasks, each test-first and reviewed:
   `WHERE tenant_id = ...` filtering in route code.
 - `services/api/app/acoustid/` — `AcoustIDClient` interface, real HTTP implementation, and a
   `FixtureAcoustIDClient` test double driven by `services/api/app/acoustid/fixtures.py`.
-- `services/api/app/fingerprint.py` — ffmpeg/Chromaprint-based fingerprinting (`fpcalc` via
-  subprocess).
+- `services/api/app/fingerprint.py` — Chromaprint fingerprinting via ffmpeg's built-in `chromaprint`
+  muxer (`ffmpeg -f chromaprint`), not the separate `fpcalc` binary — one fewer external tool to
+  install/pin/track CVEs on, per the design spec.
 - `services/api/app/gate.py` — `resolve_lane_outcome`, the lane x match-result table: Lane A always
   holds on a match, Lane B holds unless the license on file covers the recording, Lane C always holds
   on a match (PD/CC claims need manual verification even though they might be legitimately public
@@ -53,6 +54,49 @@ later):
   reviewer/admin role check).
 - The `jobs`, `stems`, `lyric_versions`, `word_timings`, `pitch_contours`, `takedowns` tables (later
   milestones).
+
+## Reviewed — M1
+
+Each of M1's 11 tasks went through a task-scoped implement-then-review gate (per
+superpowers:subagent-driven-development), not just a single pass. Four real, reproducible bugs
+surfaced and were fixed along the way — this wasn't a smooth, uninterrupted build, and that's the
+point of the gate:
+
+- **Task 1** — `db_session_for_tenant` originally used `SET LOCAL app.tenant_id = :tenant_id`.
+  Postgres's `SET`/`SET LOCAL` grammar rejects bound parameters outright (`psycopg.errors.SyntaxError`
+  on every call, reproduced live) — switched to `SELECT set_config('app.tenant_id', :tenant_id, true)`,
+  which does accept one and has identical transaction-scoped semantics.
+- **Task 2** — the implementer added unrequested `alembic/__init__.py` and
+  `alembic/versions/__init__.py` files, and the first one shadowed the real third-party `alembic`
+  package, breaking `python -m alembic upgrade head` — the exact command the plan documents. Both
+  files removed; standard `alembic init` never generates them for this reason.
+- **Task 3 (the significant one)** — discovered that RLS policies alone don't work: `songbox`
+  (`POSTGRES_USER` in the official postgres image) is a genuine Postgres superuser, and superusers
+  unconditionally bypass every RLS policy regardless of `FORCE ROW LEVEL SECURITY` — confirmed live
+  (`rolsuper = t`). A restricted, non-superuser role (`songbox_app`) was added, created and granted
+  table privileges by the RLS migration itself, with `db_session_for_tenant` connecting through it
+  instead. The reviewer independently live-verified `current_user` via that function actually resolves
+  to `songbox_app` with `rolsuper = False`, audited the exact grants (nothing broader than needed), and
+  ran a full downgrade/upgrade cycle.
+- **Task 9** — two bugs surfaced together in the endpoint that proves M1's own "done when" criterion:
+  (1) `tempfile.NamedTemporaryFile`'s `with`-block form keeps its own handle open, which Windows won't
+  let a second process (ffmpeg) also open — fixed with `delete=False` + explicit close + manual
+  cleanup; (2) none of the SQLAlchemy models declare `relationship()`s, so nothing gives the ORM
+  ordering guidance across FK-dependent inserts in one flush — a 3-model insert chain
+  (declaration→track→match) tripped a real `ForeignKeyViolation` that a 2-model chain didn't, proving
+  genuine order-dependence rather than a phantom problem. Fixed with explicit `db.flush()` calls,
+  applied proactively to Task 10's near-identical insert-then-update pattern too, so it didn't recur.
+
+Two environment issues (not code bugs) were also hit and fixed permanently rather than worked around
+per-task: a native Windows PostgreSQL 18 service was silently shadowing Docker's Postgres container on
+port 5432 for any `localhost` client (remapped the container to 5433); and this session's Bash tool had
+snapshotted its `PATH` before ffmpeg was installed mid-session, so Bash-driven subagents couldn't find
+it even though PowerShell could (fixed by placing the binaries in `C:\Users\aashw\bin`, already first on
+Bash's `PATH`).
+
+Every fix above was independently verified — either by the task reviewer re-running the failing
+command live, or by the reviewer reproducing the bug from scratch in an isolated script before
+confirming the fix — not accepted on the implementer's word alone.
 
 ## Done — M0 complete
 
