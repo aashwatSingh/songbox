@@ -10,9 +10,15 @@ from sqlalchemy.orm import Session, sessionmaker
 DATABASE_URL = os.environ.get(
     "DATABASE_URL", "postgresql+psycopg://songbox:songbox@localhost:5433/songbox"
 )
+APP_DATABASE_URL = os.environ.get(
+    "APP_DATABASE_URL", "postgresql+psycopg://songbox_app:songbox_app@localhost:5433/songbox"
+)
 
 _engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=_engine, expire_on_commit=False)
+
+_app_engine = create_engine(APP_DATABASE_URL, pool_pre_ping=True)
+AppSessionLocal = sessionmaker(bind=_app_engine, expire_on_commit=False)
 
 
 def get_engine() -> Engine:
@@ -30,7 +36,7 @@ def db_session_for_tenant(tenant_id: uuid.UUID) -> Session:
     first statement executed on the session -- SQLAlchemy's Session begins its transaction
     lazily on first execute(), so this call itself starts it.
     """
-    session = SessionLocal()
+    session = AppSessionLocal()
     try:
         session.execute(
             text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
