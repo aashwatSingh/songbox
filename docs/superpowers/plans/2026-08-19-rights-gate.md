@@ -45,9 +45,11 @@ These apply to every task below — copied from `CLAUDE.md` and `docs/superpower
 # services/api/tests/test_db.py
 from __future__ import annotations
 
+import uuid
+
 from sqlalchemy import text
 
-from app.db import get_engine
+from app.db import db_session_for_tenant, get_engine
 
 
 def test_can_connect_and_select_1() -> None:
@@ -55,6 +57,16 @@ def test_can_connect_and_select_1() -> None:
     with engine.connect() as connection:
         result = connection.execute(text("SELECT 1"))
         assert result.scalar() == 1
+
+
+def test_db_session_for_tenant_sets_readable_tenant_context() -> None:
+    tenant_id = uuid.uuid4()
+    session = db_session_for_tenant(tenant_id)
+    try:
+        result = session.execute(text("SELECT current_setting('app.tenant_id', true)"))
+        assert result.scalar() == str(tenant_id)
+    finally:
+        session.close()
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -117,12 +129,23 @@ def get_engine() -> Engine:
 def db_session_for_tenant(tenant_id: uuid.UUID) -> Session:
     """Open a session and set the RLS tenant context for its transaction.
 
-    SET LOCAL only applies within the transaction it's issued in, so this must be the
+    Postgres's SET/SET LOCAL grammar does not accept bound parameters -- only literals --
+    so a parameterized SET LOCAL raises a syntax error at the driver level. set_config()
+    is a regular function call and does accept one; its third argument (true) gives it
+    the same transaction-scoped "local" semantics SET LOCAL would have, readable back via
+    current_setting() exactly the same way (see Task 3's RLS policies). This must be the
     first statement executed on the session -- SQLAlchemy's Session begins its transaction
     lazily on first execute(), so this call itself starts it.
     """
     session = SessionLocal()
-    session.execute(text("SET LOCAL app.tenant_id = :tenant_id"), {"tenant_id": str(tenant_id)})
+    try:
+        session.execute(
+            text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
+            {"tenant_id": str(tenant_id)},
+        )
+    except Exception:
+        session.close()
+        raise
     return session
 ```
 
@@ -132,7 +155,7 @@ def db_session_for_tenant(tenant_id: uuid.UUID) -> Session:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `cd services/api && ./.venv/Scripts/python.exe -m pytest tests/test_db.py -v`
-Expected: `1 passed`
+Expected: `2 passed`
 
 Also run: `./.venv/Scripts/python.exe -m ruff check . && ./.venv/Scripts/python.exe -m mypy app`
 Expected: both clean.
