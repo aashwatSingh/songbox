@@ -13,6 +13,7 @@
 These apply to every task below — copied from `CLAUDE.md` and `docs/superpowers/specs/2026-08-19-rights-gate-design.md`:
 
 - Every table carries `tenant_id`; every query is tenant-scoped. Enforced here via Postgres RLS (`FORCE ROW LEVEL SECURITY`, not just `ENABLE`, since the app's DB role owns the tables and owners bypass RLS by default unless forced).
+- **Two DB roles, not one** (discovered during Task 3): `songbox` (a genuine Postgres superuser, from `POSTGRES_USER`) is for migrations and admin-level introspection only — superusers unconditionally bypass RLS, so this role must never be used for tenant-scoped queries. `songbox_app` (created by Task 3's migration, no superuser/bypassrls) is what `db_session_for_tenant`/`AppSessionLocal` connects as, and is the only role RLS policies can ever actually constrain. Any future code that queries tenant data must go through `AppSessionLocal`/`db_session_for_tenant`, never `SessionLocal` directly.
 - No `yt-dlp`/`youtube-dl`/`pytube`-class dependency, ever. `scripts/check_forbidden_deps.py` in CI covers this automatically — no manual step needed, just don't add one.
 - ffmpeg is invoked as an argument array only, `-protocol_whitelist file`, never `shell=True`.
 - Never log raw audio, lyrics, or signed URLs.
@@ -117,9 +118,15 @@ from sqlalchemy.orm import Session, sessionmaker
 DATABASE_URL = os.environ.get(
     "DATABASE_URL", "postgresql+psycopg://songbox:songbox@localhost:5433/songbox"
 )
+APP_DATABASE_URL = os.environ.get(
+    "APP_DATABASE_URL", "postgresql+psycopg://songbox_app:songbox_app@localhost:5433/songbox"
+)
 
 _engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=_engine, expire_on_commit=False)
+
+_app_engine = create_engine(APP_DATABASE_URL, pool_pre_ping=True)
+AppSessionLocal = sessionmaker(bind=_app_engine, expire_on_commit=False)
 
 
 def get_engine() -> Engine:
@@ -127,17 +134,29 @@ def get_engine() -> Engine:
 
 
 def db_session_for_tenant(tenant_id: uuid.UUID) -> Session:
-    """Open a session and set the RLS tenant context for its transaction.
+    """Open a session, AS THE RESTRICTED songbox_app ROLE, and set the RLS tenant context
+    for its transaction.
 
-    Postgres's SET/SET LOCAL grammar does not accept bound parameters -- only literals --
-    so a parameterized SET LOCAL raises a syntax error at the driver level. set_config()
-    is a regular function call and does accept one; its third argument (true) gives it
-    the same transaction-scoped "local" semantics SET LOCAL would have, readable back via
-    current_setting() exactly the same way (see Task 3's RLS policies). This must be the
-    first statement executed on the session -- SQLAlchemy's Session begins its transaction
-    lazily on first execute(), so this call itself starts it.
+    This must connect through AppSessionLocal, not SessionLocal: SessionLocal's DATABASE_URL
+    connects as the songbox role, which is a genuine Postgres superuser (POSTGRES_USER in the
+    official postgres image is created via initdb as one) -- and superusers unconditionally
+    bypass every RLS policy regardless of FORCE ROW LEVEL SECURITY, so no policy this project
+    writes could ever actually apply to that connection. Real tenant isolation requires a
+    non-superuser, non-BYPASSRLS role -- songbox_app, created and granted table privileges by
+    Task 3's migration -- which is exactly what AppSessionLocal is for. SessionLocal / DATABASE_URL
+    remain for migrations and admin-level introspection (e.g. the RLS-enabled/forced check in
+    Task 3's test_db_rls.py, which reads pg_class and needs no elevated privilege but is
+    conceptually an admin check, not a tenant-scoped query).
+
+    Postgres's SET/SET LOCAL grammar does not accept bound parameters -- only literals -- so a
+    parameterized SET LOCAL raises a syntax error at the driver level. set_config() is a regular
+    function call and does accept one; its third argument (true) gives it the same
+    transaction-scoped "local" semantics SET LOCAL would have, readable back via current_setting()
+    exactly the same way (see Task 3's RLS policies). This must be the first statement executed
+    on the session -- SQLAlchemy's Session begins its transaction lazily on first execute(), so
+    this call itself starts it.
     """
-    session = SessionLocal()
+    session = AppSessionLocal()
     try:
         session.execute(
             text("SELECT set_config('app.tenant_id', :tenant_id, true)"),
@@ -151,6 +170,14 @@ def db_session_for_tenant(tenant_id: uuid.UUID) -> Session:
 
 (`get_db`, the FastAPI dependency version of this, is added in Task 4 once `Identity` exists to scope it by
 — no throwaway version is needed here first.)
+
+**Addendum, added when Task 3 discovered this gap:** the original version of this file only had
+`DATABASE_URL`/`SessionLocal`, and `db_session_for_tenant` used `SessionLocal` directly. That works
+for Task 1's own test (which only checks connectivity) but silently defeats the entire point of
+Task 3's RLS migration, because the `songbox` role is a real Postgres superuser and superusers
+always bypass RLS. `APP_DATABASE_URL`/`AppSessionLocal` and the role split above are the fix --
+applied retroactively to this already-merged file as part of Task 3, since Task 3 is what surfaces
+the gap and what creates the `songbox_app` role this now depends on.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -527,13 +554,27 @@ git commit -m "M1: add rights-gate models and initial migration"
 
 ### Task 3: Row-level security migration + RLS tests
 
+**Discovered while implementing this task:** RLS policies alone are not enough. `services/api/app/db.py`'s
+only DB role so far is `songbox`, which is a genuine Postgres superuser (the official `postgres` image
+creates `POSTGRES_USER` via initdb as one), and **Postgres superusers unconditionally bypass every RLS
+policy regardless of `FORCE ROW LEVEL SECURITY`.** No policy this migration writes can ever apply to a
+connection using that role. This task therefore also creates a second, restricted, non-superuser role
+(`songbox_app`) with table-level grants but no bypass privilege, and updates `db.py` so
+`db_session_for_tenant` connects through it — `db.py` was written in Task 1 before this gap was known, so
+this task retroactively fixes it as part of making RLS actually real. See the addendum on `db.py` in
+Task 1's section above for the full explanation.
+
 **Files:**
 - Create: `services/api/alembic/versions/0002_row_level_security.py`
+- Modify: `services/api/app/db.py` (add `APP_DATABASE_URL`, `_app_engine`, `AppSessionLocal`; change
+  `db_session_for_tenant` to use `AppSessionLocal` instead of `SessionLocal` — full replacement code is in
+  Task 1's section above, already updated with this addendum)
 - Test: `services/api/tests/test_db_rls.py`
 
 **Interfaces:**
-- Consumes: `db_session_for_tenant` (Task 1), `SessionLocal` (Task 1), the four model tables (Task 2).
-- Produces: nothing new callable — this task's deliverable is enforced DB behavior, verified by the test itself.
+- Consumes: `db_session_for_tenant` (Task 1, modified by this task), `SessionLocal` (Task 1), the four model tables (Task 2).
+- Produces: `AppSessionLocal` (Task 1's `db.py`, added by this task) — no other new callable; this task's
+  main deliverable is enforced DB behavior, verified by the test itself.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -604,9 +645,13 @@ def test_tenant_cannot_see_another_tenants_license_row() -> None:
 Run: `cd services/api && ./.venv/Scripts/python.exe -m pytest tests/test_db_rls.py -v`
 Expected: FAIL — `relrowsecurity` is false (RLS not enabled yet), so the first test fails.
 
-- [ ] **Step 3: Write the migration**
+- [ ] **Step 3: Update `db.py`, then write the migration**
 
-Create `services/api/alembic/versions/0002_row_level_security.py`:
+First, replace `services/api/app/db.py` in full with the updated version from Task 1's section above
+(the one with `APP_DATABASE_URL`, `_app_engine`, `AppSessionLocal`, and `db_session_for_tenant` using
+`AppSessionLocal`) — this file already exists from Task 1 and is being modified, not created.
+
+Then create `services/api/alembic/versions/0002_row_level_security.py`:
 
 ```python
 """enable row level security
@@ -627,8 +672,29 @@ depends_on = None
 
 TABLES = ("licenses", "rights_declarations", "tracks", "fingerprint_matches")
 
+APP_ROLE = "songbox_app"
+APP_ROLE_PASSWORD = "songbox_app"  # dev-only, matches the plaintext dev creds already in docker-compose.yml
+
 
 def upgrade() -> None:
+    # songbox_app is intentionally NOT superuser and NOT bypassrls -- that's the entire point.
+    # CREATE ROLE has no IF NOT EXISTS in Postgres, so guard it with a DO block for idempotency
+    # (re-running migrations against an existing dev DB, or migrating a fresh one, both work).
+    op.execute(
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{APP_ROLE}') THEN
+                CREATE ROLE {APP_ROLE} LOGIN PASSWORD '{APP_ROLE_PASSWORD}';
+            END IF;
+        END
+        $$;
+        """
+    )
+    op.execute(f"GRANT CONNECT ON DATABASE songbox TO {APP_ROLE}")
+    op.execute(f"GRANT USAGE ON SCHEMA public TO {APP_ROLE}")
+    op.execute(f"GRANT SELECT, INSERT, UPDATE, DELETE ON {', '.join(TABLES)} TO {APP_ROLE}")
+
     for table in TABLES:
         op.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
         op.execute(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY")
@@ -645,9 +711,18 @@ def downgrade() -> None:
     for table in TABLES:
         op.execute(f"DROP POLICY IF EXISTS tenant_isolation ON {table}")
         op.execute(f"ALTER TABLE {table} DISABLE ROW LEVEL SECURITY")
+
+    op.execute(f"REVOKE SELECT, INSERT, UPDATE, DELETE ON {', '.join(TABLES)} FROM {APP_ROLE}")
+    op.execute(f"REVOKE USAGE ON SCHEMA public FROM {APP_ROLE}")
+    op.execute(f"REVOKE CONNECT ON DATABASE songbox FROM {APP_ROLE}")
+    # The role itself is intentionally left in place on downgrade (DROP ROLE can fail if anything
+    # else references it, and leaving an unprivileged, ungranted role around is harmless).
 ```
 
 The `current_setting('app.tenant_id', true)` second argument means "return NULL instead of erroring if unset" — so a session that never calls `db_session_for_tenant` (and thus never sets `app.tenant_id`) sees the policy evaluate to `tenant_id = NULL`, which is never true: default-deny, not an error.
+
+`APP_DATABASE_URL`'s default in `db.py` (`postgresql+psycopg://songbox_app:songbox_app@localhost:5433/songbox`)
+must match `APP_ROLE`/`APP_ROLE_PASSWORD` here exactly.
 
 Run: `cd services/api && ./.venv/Scripts/python.exe -m alembic upgrade head`
 Expected: ends at revision `0002`.
@@ -662,7 +737,7 @@ Also run: `./.venv/Scripts/python.exe -m ruff check . && ./.venv/Scripts/python.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add services/api/alembic/versions/0002_row_level_security.py services/api/tests/test_db_rls.py
+git add services/api/alembic/versions/0002_row_level_security.py services/api/tests/test_db_rls.py services/api/app/db.py
 git commit -m "M1: enforce row-level security on all rights-gate tables"
 ```
 
