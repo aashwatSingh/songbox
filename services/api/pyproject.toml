@@ -21,6 +21,13 @@ dev = [
     "pytest>=8.3",
 ]
 
+[tool.setuptools]
+# alembic/ has real .py files (env.py, versions/*.py) but is Alembic's own convention, not a
+# package of this distribution -- Alembic reads those files directly via its CLI, never
+# `import`s them through songbox_api. Without this, setuptools' flat-layout auto-discovery sees
+# two top-level packages (app, alembic) and refuses to build at all.
+packages = ["app"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"
