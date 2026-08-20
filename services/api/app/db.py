@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import os
 import uuid
+from collections.abc import Generator
 
+from fastapi import Depends
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
+
+from app.auth import Identity, get_identity
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL", "postgresql+psycopg://songbox:songbox@localhost:5433/songbox"
@@ -46,3 +50,15 @@ def db_session_for_tenant(tenant_id: uuid.UUID) -> Session:
         session.close()
         raise
     return session
+
+
+def get_db(identity: Identity = Depends(get_identity)) -> Generator[Session, None, None]:
+    session = db_session_for_tenant(identity.tenant_id)
+    try:
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
