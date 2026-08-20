@@ -31,13 +31,16 @@ Built across 11 tasks, each test-first and reviewed:
 - `services/api/app/storage.py` — MinIO wrapper for uploaded track files.
 - `services/api/app/routes/tracks.py` — `POST /tracks/upload` (end-to-end: fingerprint, gate,
   store file, write declaration/track/match rows) and `POST /tracks/{id}/confirm-attestation`
-  (Lane A's path to override a hold with a stronger, named-release attestation — written as a new
-  superseding `rights_declarations` row, never a mutation of the original).
-- `services/api/app/routes/review_queue.py` (this task) — `GET /review-queue` (lists tracks stuck in
-  `pending_review`, tenant-scoped via RLS) and `POST /review-queue/{id}/resolve` (a human reviewer
-  approves -> `passed`, or rejects -> `rejected`). `"rejected"` is a human-review-only status; the
-  automated gate in `gate.py` never produces it itself.
-- 30 tests across `services/api/tests/`, all passing; `ruff check .` and `mypy app` (strict) both clean.
+  (Lane A's path to add a stronger, named-release attestation as evidence — a new immutable
+  `rights_declarations` row, never a mutation of the original). It is deliberately NOT sufficient
+  on its own to clear a hold — see "Reviewed — M1" below for why.
+- `services/api/app/routes/review_queue.py` — `GET /review-queue` (lists tracks stuck in
+  `pending_review`, tenant-scoped via RLS, with enough context — lane, attestation text, uploader,
+  timestamp — to actually be reviewable) and `POST /review-queue/{id}/resolve` (a human reviewer
+  approves -> `passed`, or rejects -> `rejected`). This is the ONLY endpoint that can move a track
+  out of `pending_review` — `"rejected"` is a human-review-only status; the automated gate in
+  `gate.py` never produces it itself, and neither does `confirm-attestation`.
+- 32 tests across `services/api/tests/`, all passing; `ruff check .` and `mypy app` (strict) both clean.
 
 Deliberately deferred (all listed under "Out of scope for M1" in
 `docs/superpowers/specs/2026-08-19-rights-gate-design.md`, so none of this should come as a surprise
@@ -97,6 +100,46 @@ Bash's `PATH`).
 Every fix above was independently verified — either by the task reviewer re-running the failing
 command live, or by the reviewer reproducing the bug from scratch in an isolated script before
 confirming the fix — not accepted on the implementer's word alone.
+
+### Final whole-branch review
+
+After all 11 tasks passed their own task-scoped review, a final review of the whole branch together
+(the kind of thing no single task's narrow diff can surface) found one Critical issue and 7 Important
+ones. The Critical one took three rounds to actually close and is worth recording in full, because
+each round's fix turned out to be insufficient in a way only live attack-style testing caught:
+
+1. **Round 1 (the bug):** `confirm-attestation` unconditionally passed a held Lane A track on any
+   `release_name` at all — verified live: self-confirming with `release_name="literally anything"`
+   moved a track to `passed` and removed it from `/review-queue`, so no human ever saw it. This
+   directly defeated `CLAUDE.md`'s "nothing reaches a GPU without a rights-gate PASS" invariant — the
+   PASS was self-granted.
+2. **Round 2 (insufficient fix):** added a `_release_names_reconcile` substring-matching check
+   requiring the submitted name to textually overlap the AcoustID-matched release title. Re-review
+   found this defeated by a single character (`release_name="a"` matches almost any title) — and,
+   more fundamentally, that no string-matching approach could ever work as a security boundary here:
+   M1 has no reviewer/admin role separation yet, so the uploader can read the exact `matched_release`
+   value straight off `GET /review-queue` (same auth as their own upload) and echo it back.
+3. **Round 3 (the actual fix):** removed the matching logic entirely. `confirm-attestation` now only
+   *records* the stronger attestation as an additional immutable `rights_declarations` row — it never
+   touches `track.status` or `FingerprintMatch.resolution`/`reviewer_id`. The only way a Lane A hold
+   can be cleared is a human calling `POST /review-queue/{id}/resolve` (Task 11, unmodified). An
+   independent re-review then live-attacked this version specifically (one-character names, the exact
+   matched title echoed back, 5 repeated calls, empty/oversized/SQL-injection/mass-assignment payloads,
+   cross-tenant attempts) and confirmed none of them move a track off `pending_review`, and traced
+   every write to `Track.status` across the whole `routes/` package to confirm
+   `review_queue.py`'s `resolve_review` is provably the only one. That same pass found one more real
+   gap — `confirm-attestation` was still repointing `track.rights_declaration_id` at the new row,
+   which let any same-tenant caller (not just the original uploader) silently replace the attestation
+   text, uploader identity, and timestamp a future reviewer would see — fixed by leaving that FK alone;
+   the evidence is still persisted, just not substituted into what the review queue shows.
+
+The other 7 Important findings (`ffprobe` missing `-protocol_whitelist file` on one of two calls, the
+AcoustID response being stored as a bare matched/error boolean instead of the real match data, the
+review queue lacking enough context to actually review anything, the tenant_id/RLS tests being
+hardcoded allowlists instead of deriving from `Base.metadata`, CI having no service containers to
+actually run the suite against, and no indexes beyond primary keys) were fixed in one batch and
+independently re-verified — including live DB reads of the new indexes and a live probe proving the
+`Base.metadata`-derived tests actually catch an injected model missing `tenant_id`.
 
 ## Done — M0 complete
 
