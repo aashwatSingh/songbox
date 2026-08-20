@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 import tempfile
 import uuid
 from datetime import UTC, datetime
@@ -8,34 +7,17 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.acoustid.client import AcoustIDClient, HTTPAcoustIDClient
 from app.auth import Identity, get_identity
 from app.db import get_db
 from app.fingerprint import FingerprintError, fingerprint_audio
-from app.gate import FingerprintResolution, resolve_lane_outcome
+from app.gate import resolve_lane_outcome
 from app.models import FingerprintMatch, License, RightsDeclaration, Track
 from app.storage import get_minio_client, save_track_file
 
 router = APIRouter()
-
-
-def _release_names_reconcile(submitted: str, matched: str | None) -> bool:
-    """Guards confirm-attestation against a bare "type anything" bypass: requires genuine
-    textual overlap between the release name the user claims and what AcoustID actually
-    matched, not just any non-empty string. Deliberately conservative (substring match on
-    alphanumeric-normalized text), not general fuzzy title matching -- the point is to catch
-    the trivial bypass, not solve title matching in general.
-    """
-    if not matched:
-        return False
-    submitted_norm = re.sub(r"[^a-z0-9]", "", submitted.lower())
-    matched_norm = re.sub(r"[^a-z0-9]", "", matched.lower())
-    if not submitted_norm or not matched_norm:
-        return False
-    return submitted_norm in matched_norm or matched_norm in submitted_norm
 
 
 def get_acoustid_client() -> AcoustIDClient:
@@ -161,7 +143,6 @@ class ConfirmAttestationRequest(BaseModel):
 class ConfirmAttestationResponse(BaseModel):
     track_id: uuid.UUID
     status: str
-    reconciled: bool
 
 
 @router.post("/tracks/{track_id}/confirm-attestation", response_model=ConfirmAttestationResponse)
@@ -184,27 +165,14 @@ def confirm_attestation(
     if declaration is None or declaration.lane != "A":
         raise HTTPException(status_code=409, detail="confirm-attestation is only valid for lane A")
 
-    match_stmt = (
-        select(FingerprintMatch)
-        .where(FingerprintMatch.track_id == track.id)
-        .order_by(FingerprintMatch.id.desc())
-    )
-    match_row = db.execute(match_stmt).scalars().first()
-
-    matched_release = match_row.matched_release if match_row is not None else None
-    if not _release_names_reconcile(body.release_name, matched_release):
-        return ConfirmAttestationResponse(
-            track_id=track.id, status=track.status, reconciled=False
-        )
-
-    if match_row is not None:
-        match_row.resolution = FingerprintResolution.CONFIRMED.value
-        match_row.reviewer_id = identity.user_id
-
-    # rights_declarations rows are immutable -- record the stronger attestation as a new
-    # row that supersedes the original, never mutate the original in place. The provenance
-    # (ip_address, attestation_text) is THIS request's, not copied from the original hold --
-    # copying the original's stale IP/text would misrepresent what actually happened here.
+    # rights_declarations rows are immutable -- record the stronger, named-release attestation
+    # as a new row that supersedes the original, never mutate the original in place. This is
+    # evidence for a human reviewer, not a self-service unlock: M1 has no reviewer/admin role
+    # separation yet (the dev auth stub can't tell an uploader from a reviewer), and the
+    # uploader can already read the exact matched_release string off GET /review-queue -- so
+    # no amount of string-matching the submitted release_name against it can be a real
+    # security boundary. track.status is therefore left untouched here; only a human calling
+    # POST /review-queue/{id}/resolve can actually clear a hold.
     stronger = RightsDeclaration(
         id=uuid.uuid4(),
         tenant_id=identity.tenant_id,
@@ -219,12 +187,8 @@ def confirm_attestation(
         release_name=body.release_name,
     )
     db.add(stronger)
-    # Same reasoning as Task 9's declaration->track flush: no relationship() mappings means
-    # SQLAlchemy has no dependency-graph guidance ordering this INSERT before the UPDATE below,
-    # which references stronger.id via a real FK column. Flush before the update, not after.
     db.flush()
 
-    track.status = "passed"
     track.rights_declaration_id = stronger.id
 
-    return ConfirmAttestationResponse(track_id=track.id, status=track.status, reconciled=True)
+    return ConfirmAttestationResponse(track_id=track.id, status=track.status)
