@@ -1665,13 +1665,21 @@ def upload_track(
         raise HTTPException(status_code=422, detail="lane must be one of A, B, C")
 
     data = file.file.read()
-    with tempfile.NamedTemporaryFile(suffix=Path(file.filename or "upload").suffix) as tmp:
+    # delete=False + explicit close, not the `with ... as tmp:` context-manager form: on Windows,
+    # NamedTemporaryFile keeps its own handle open for the file's lifetime, and a second process
+    # (ffmpeg/ffprobe, launched by fingerprint_audio) cannot open a file another handle still holds
+    # exclusively -- confirmed live on this dev machine. Close it ourselves before ffmpeg reads it,
+    # then unlink it ourselves once we're done, since delete=False means nothing else will.
+    tmp = tempfile.NamedTemporaryFile(suffix=Path(file.filename or "upload").suffix, delete=False)
+    try:
         tmp.write(data)
-        tmp.flush()
+        tmp.close()
         try:
             fp = fingerprint_audio(Path(tmp.name))
         except FingerprintError as exc:
             raise HTTPException(status_code=422, detail=f"could not fingerprint audio: {exc}") from exc
+    finally:
+        Path(tmp.name).unlink(missing_ok=True)
 
     license_covers_recording: bool | None = None
     if lane == "B":
@@ -1702,6 +1710,11 @@ def upload_track(
         attribution_string=attribution_string,
     )
     db.add(declaration)
+    # None of these models declare relationship()s (see models.py -- plain ForeignKey columns
+    # only), so SQLAlchemy has no mapper-level guidance for insert ordering across the three
+    # dependent rows below; without an explicit flush here, `track` can be sent to Postgres
+    # before `declaration` exists, tripping its own FK constraint. Confirmed live.
+    db.flush()
 
     track = Track(
         id=uuid.uuid4(),
@@ -1713,6 +1726,7 @@ def upload_track(
         storage_key=storage_key,
     )
     db.add(track)
+    db.flush()
 
     match_row = FingerprintMatch(
         id=uuid.uuid4(),
@@ -1898,6 +1912,10 @@ def confirm_attestation(
         release_name=body.release_name,
     )
     db.add(stronger)
+    # Same reasoning as Task 9's declaration->track flush: no relationship() mappings means
+    # SQLAlchemy has no dependency-graph guidance ordering this INSERT before the UPDATE below,
+    # which references stronger.id via a real FK column. Flush before the update, not after.
+    db.flush()
 
     track.status = "passed"
     track.rights_declaration_id = stronger.id
