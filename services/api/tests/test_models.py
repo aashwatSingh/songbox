@@ -3,25 +3,18 @@ from __future__ import annotations
 from sqlalchemy import inspect
 
 from app.db import get_engine
-from app.models import FingerprintMatch, License, RightsDeclaration, Track
-
-EXPECTED_TABLES = {
-    "licenses": License,
-    "rights_declarations": RightsDeclaration,
-    "tracks": Track,
-    "fingerprint_matches": FingerprintMatch,
-}
+from app.models import Base
 
 
-def test_all_expected_tables_exist_after_migration() -> None:
+def test_every_registered_model_has_a_tenant_id_column() -> None:
+    for table_name, table in Base.metadata.tables.items():
+        columns = {c.name for c in table.columns}
+        assert "tenant_id" in columns, f"{table_name} has no tenant_id column"
+
+
+def test_every_registered_model_table_exists_in_the_database() -> None:
     inspector = inspect(get_engine())
     existing = set(inspector.get_table_names())
-    for table_name in EXPECTED_TABLES:
-        msg = f"{table_name} missing -- did you run `alembic upgrade head`?"
-        assert table_name in existing, msg
-
-
-def test_every_model_table_has_a_tenant_id_column() -> None:
-    for table_name, model in EXPECTED_TABLES.items():
-        columns = {c.name for c in model.__table__.columns}
-        assert "tenant_id" in columns, f"{table_name} has no tenant_id column"
+    registered = set(Base.metadata.tables.keys())
+    missing = registered - existing
+    assert not missing, f"{missing} missing from DB -- did you run `alembic upgrade head`?"

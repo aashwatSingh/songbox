@@ -25,6 +25,8 @@ def fingerprint_audio(path: Path) -> Fingerprint:
     duration_result = subprocess.run(
         [
             ffprobe,
+            "-protocol_whitelist",
+            "file",
             "-v",
             "error",
             "-show_entries",

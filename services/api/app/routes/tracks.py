@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import tempfile
 import uuid
 from datetime import UTC, datetime
@@ -19,6 +20,22 @@ from app.models import FingerprintMatch, License, RightsDeclaration, Track
 from app.storage import get_minio_client, save_track_file
 
 router = APIRouter()
+
+
+def _release_names_reconcile(submitted: str, matched: str | None) -> bool:
+    """Guards confirm-attestation against a bare "type anything" bypass: requires genuine
+    textual overlap between the release name the user claims and what AcoustID actually
+    matched, not just any non-empty string. Deliberately conservative (substring match on
+    alphanumeric-normalized text), not general fuzzy title matching -- the point is to catch
+    the trivial bypass, not solve title matching in general.
+    """
+    if not matched:
+        return False
+    submitted_norm = re.sub(r"[^a-z0-9]", "", submitted.lower())
+    matched_norm = re.sub(r"[^a-z0-9]", "", matched.lower())
+    if not submitted_norm or not matched_norm:
+        return False
+    return submitted_norm in matched_norm or matched_norm in submitted_norm
 
 
 def get_acoustid_client() -> AcoustIDClient:
@@ -116,7 +133,17 @@ def upload_track(
         id=uuid.uuid4(),
         tenant_id=identity.tenant_id,
         track_id=track.id,
-        acoustid_response={"matched": acoustid_result.matched, "error": acoustid_result.error},
+        acoustid_response={
+            "error": acoustid_result.error,
+            "matches": [
+                {
+                    "release_title": m.release_title,
+                    "recording_id": m.recording_id,
+                    "score": m.score,
+                }
+                for m in acoustid_result.matches
+            ],
+        },
         matched_release=(
             acoustid_result.matches[0].release_title if acoustid_result.matches else None
         ),
@@ -134,12 +161,14 @@ class ConfirmAttestationRequest(BaseModel):
 class ConfirmAttestationResponse(BaseModel):
     track_id: uuid.UUID
     status: str
+    reconciled: bool
 
 
 @router.post("/tracks/{track_id}/confirm-attestation", response_model=ConfirmAttestationResponse)
 def confirm_attestation(
     track_id: uuid.UUID,
     body: ConfirmAttestationRequest,
+    request: Request,
     identity: Identity = Depends(get_identity),
     db: Session = Depends(get_db),
 ) -> ConfirmAttestationResponse:
@@ -161,19 +190,31 @@ def confirm_attestation(
         .order_by(FingerprintMatch.id.desc())
     )
     match_row = db.execute(match_stmt).scalars().first()
+
+    matched_release = match_row.matched_release if match_row is not None else None
+    if not _release_names_reconcile(body.release_name, matched_release):
+        return ConfirmAttestationResponse(
+            track_id=track.id, status=track.status, reconciled=False
+        )
+
     if match_row is not None:
         match_row.resolution = FingerprintResolution.CONFIRMED.value
         match_row.reviewer_id = identity.user_id
 
     # rights_declarations rows are immutable -- record the stronger attestation as a new
-    # row that supersedes the original, never mutate the original in place.
+    # row that supersedes the original, never mutate the original in place. The provenance
+    # (ip_address, attestation_text) is THIS request's, not copied from the original hold --
+    # copying the original's stale IP/text would misrepresent what actually happened here.
     stronger = RightsDeclaration(
         id=uuid.uuid4(),
         tenant_id=identity.tenant_id,
         user_id=identity.user_id,
         lane="A",
-        attestation_text=declaration.attestation_text,
-        ip_address=declaration.ip_address,
+        attestation_text=(
+            f"Stronger attestation (Lane A hold): I confirm I hold the rights to the "
+            f"specific release '{body.release_name}', which the fingerprint check matched."
+        ),
+        ip_address=request.client.host if request.client else "unknown",
         created_at=datetime.now(UTC),
         release_name=body.release_name,
     )
@@ -186,4 +227,4 @@ def confirm_attestation(
     track.status = "passed"
     track.rights_declaration_id = stronger.id
 
-    return ConfirmAttestationResponse(track_id=track.id, status=track.status)
+    return ConfirmAttestationResponse(track_id=track.id, status=track.status, reconciled=True)

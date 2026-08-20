@@ -5,8 +5,9 @@ import uuid
 from sqlalchemy import text
 
 from app.db import SessionLocal, db_session_for_tenant
+from app.models import Base
 
-RLS_TABLES = ("licenses", "rights_declarations", "tracks", "fingerprint_matches")
+RLS_TABLES = tuple(Base.metadata.tables.keys())
 
 
 def test_every_table_has_row_level_security_enabled_and_forced() -> None:

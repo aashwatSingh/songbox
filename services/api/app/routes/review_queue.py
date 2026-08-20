@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -10,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.auth import Identity, get_identity
 from app.db import get_db
 from app.gate import FingerprintResolution
-from app.models import FingerprintMatch, Track
+from app.models import FingerprintMatch, RightsDeclaration, Track
 
 router = APIRouter()
 
@@ -21,6 +22,12 @@ class ReviewQueueItem(BaseModel):
     match_id: uuid.UUID
     resolution: str
     matched_release: str | None
+    lane: str
+    attestation_text: str
+    user_id: uuid.UUID
+    uploaded_at: datetime
+    title: str | None
+    artist: str | None
 
 
 class ResolveReviewRequest(BaseModel):
@@ -38,8 +45,9 @@ def list_review_queue(
     db: Session = Depends(get_db),
 ) -> list[ReviewQueueItem]:
     stmt = (
-        select(Track, FingerprintMatch)
+        select(Track, FingerprintMatch, RightsDeclaration)
         .join(FingerprintMatch, FingerprintMatch.track_id == Track.id)
+        .join(RightsDeclaration, RightsDeclaration.id == Track.rights_declaration_id)
         .where(Track.status == "pending_review")
     )
     rows = db.execute(stmt).all()
@@ -50,8 +58,14 @@ def list_review_queue(
             match_id=match.id,
             resolution=match.resolution,
             matched_release=match.matched_release,
+            lane=declaration.lane,
+            attestation_text=declaration.attestation_text,
+            user_id=declaration.user_id,
+            uploaded_at=declaration.created_at,
+            title=track.title,
+            artist=track.artist,
         )
-        for track, match in rows
+        for track, match, declaration in rows
     ]
 
 
