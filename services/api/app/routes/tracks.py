@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 import uuid
 from datetime import UTC, datetime
@@ -299,19 +300,25 @@ def separate_track(
         Path(tmp.name).unlink(missing_ok=True)
 
     stems: list[StemInfo] = []
-    for stem_type, stem_path in stem_paths.items():
-        stem_bytes = stem_path.read_bytes()
-        storage_key = save_track_file(minio_client, identity.tenant_id, stem_bytes)
-        db.add(
-            Stem(
-                id=uuid.uuid4(),
-                tenant_id=identity.tenant_id,
-                track_id=track.id,
-                stem_type=stem_type,
-                storage_key=storage_key,
-                model_name=model_name,
+    try:
+        for stem_type, stem_path in stem_paths.items():
+            stem_bytes = stem_path.read_bytes()
+            storage_key = save_track_file(minio_client, identity.tenant_id, stem_bytes)
+            db.add(
+                Stem(
+                    id=uuid.uuid4(),
+                    tenant_id=identity.tenant_id,
+                    track_id=track.id,
+                    stem_type=stem_type,
+                    storage_key=storage_key,
+                    model_name=model_name,
+                )
             )
-        )
-        stems.append(StemInfo(stem_type=stem_type, storage_key=storage_key))
+            stems.append(StemInfo(stem_type=stem_type, storage_key=storage_key))
+    finally:
+        # Clean up the temp directory created by separate_audio() -- all stem files share
+        # the same parent directory from tempfile.mkdtemp(). Get the parent of any stem path.
+        stem_dir = next(iter(stem_paths.values())).parent
+        shutil.rmtree(stem_dir, ignore_errors=True)
 
     return SeparateResponse(track_id=track.id, stems=stems)
