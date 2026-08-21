@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import tempfile
+import time
 import uuid
+import wave
 from pathlib import Path
 
 import pytest
@@ -13,6 +16,7 @@ from app.db import db_session_for_tenant
 from app.fingerprint import fingerprint_audio
 from app.main import app
 from app.routes.tracks import get_acoustid_client
+from app.storage import fetch_track_file, get_minio_client
 
 client = TestClient(app)
 
@@ -49,8 +53,26 @@ def test_separate_stores_four_stems_for_a_passed_track(synthetic_wav: Path) -> N
     assert body["track_id"] == track_id
     stem_types = {s["stem_type"] for s in body["stems"]}
     assert stem_types == {"vocals", "drums", "bass", "other"}
+
+    # Fetch the ACTUAL bytes back from MinIO for every stem and verify they're real 44.1kHz
+    # stereo WAV data -- mirrors what tests/test_separation.py already asserts for
+    # separate_audio()'s direct output, but here proves the full upload round-trip (bucket,
+    # storage key, byte-for-byte content) rather than just the DB rows and key prefix.
+    minio_client = get_minio_client()
     for stem in body["stems"]:
         assert stem["storage_key"].startswith(f"{HEADERS['X-Dev-Tenant-Id']}/")
+        stem_bytes = fetch_track_file(minio_client, stem["storage_key"])
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            tmp.write(stem_bytes)
+            tmp_path = Path(tmp.name)
+        try:
+            with wave.open(str(tmp_path), "rb") as wav_file:
+                assert wav_file.getframerate() == 44100, (
+                    f"{stem['stem_type']} stem is not 44.1kHz"
+                )
+                assert wav_file.getnchannels() == 2, f"{stem['stem_type']} stem is not stereo"
+        finally:
+            tmp_path.unlink(missing_ok=True)
 
     session = db_session_for_tenant(uuid.UUID(HEADERS["X-Dev-Tenant-Id"]))
     try:
@@ -110,3 +132,24 @@ def test_separate_rejects_unknown_model_name(
     )
 
     assert response.status_code == 422
+
+
+def test_separate_returns_504_when_separation_exceeds_the_wall_clock_timeout(
+    monkeypatch: pytest.MonkeyPatch, synthetic_wav: Path
+) -> None:
+    # Shrink the timeout to something the test can actually wait out, and make the (monkeypatched)
+    # separate_audio() sleep past it -- this exercises the real Thread.join(timeout=...) path in
+    # _separate_audio_with_timeout() without the test needing to wait anywhere near the real
+    # SEPARATION_TIMEOUT_SECONDS (1800s) production value.
+    monkeypatch.setattr("app.routes.tracks.SEPARATION_TIMEOUT_SECONDS", 0.05)
+
+    def _slow_separate(*args: object, **kwargs: object) -> dict[str, Path]:
+        time.sleep(0.5)
+        return {}
+
+    monkeypatch.setattr("app.routes.tracks.separate_audio", _slow_separate)
+    track_id = _upload_and_pass_track(synthetic_wav)
+
+    response = client.post(f"/tracks/{track_id}/separate", headers=HEADERS)
+
+    assert response.status_code == 504
