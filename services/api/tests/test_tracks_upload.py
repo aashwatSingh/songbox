@@ -102,6 +102,7 @@ def test_upload_rejects_truncated_header() -> None:
         files={"file": ("tone.wav", b"RIFF", "audio/wav")},
     )
     assert response.status_code == 422
+    assert response.json()["detail"] == "file does not match any accepted audio format"
 
 
 def test_upload_rejects_wrong_magic_bytes() -> None:
@@ -112,6 +113,7 @@ def test_upload_rejects_wrong_magic_bytes() -> None:
         files={"file": ("tone.wav", b"this is plain text, not audio at all", "audio/wav")},
     )
     assert response.status_code == 422
+    assert response.json()["detail"] == "file does not match any accepted audio format"
 
 
 def test_upload_rejects_playlist_with_remote_url() -> None:
@@ -123,6 +125,7 @@ def test_upload_rejects_playlist_with_remote_url() -> None:
         files={"file": ("playlist.wav", playlist, "audio/wav")},
     )
     assert response.status_code == 422
+    assert response.json()["detail"] == "file does not match any accepted audio format"
 
 
 def test_upload_rejects_duration_bomb(tmp_path: Path) -> None:
