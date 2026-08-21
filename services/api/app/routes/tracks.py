@@ -16,6 +16,7 @@ from app.fingerprint import FingerprintError, fingerprint_audio
 from app.gate import resolve_lane_outcome
 from app.models import FingerprintMatch, License, RightsDeclaration, Track
 from app.storage import get_minio_client, save_track_file
+from app.validation import detect_audio_format
 
 router = APIRouter()
 
@@ -48,6 +49,8 @@ def upload_track(
         raise HTTPException(status_code=422, detail="lane must be one of A, B, C")
 
     data = file.file.read()
+    if detect_audio_format(data) is None:
+        raise HTTPException(status_code=422, detail="file does not match any accepted audio format")
     # delete=False + explicit close before fingerprinting: on Windows, NamedTemporaryFile
     # opens the file exclusively, so a subprocess (ffprobe/ffmpeg) can't open it while our
     # handle is still open. Close it first, then clean up manually in the finally block.
@@ -78,7 +81,7 @@ def upload_track(
     decision = resolve_lane_outcome(lane, acoustid_result, license_covers_recording)
 
     minio_client = get_minio_client()
-    storage_key = save_track_file(minio_client, identity.tenant_id, file.filename or "upload", data)
+    storage_key = save_track_file(minio_client, identity.tenant_id, data)
 
     declaration = RightsDeclaration(
         id=uuid.uuid4(),

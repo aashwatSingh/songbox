@@ -92,3 +92,66 @@ def test_lane_a_upload_of_original_recording_passes(original_tone: Path) -> None
 
     assert response.status_code == 200
     assert response.json()["status"] == "passed"
+
+
+def test_upload_rejects_truncated_header() -> None:
+    response = client.post(
+        "/tracks/upload",
+        headers=HEADERS,
+        data={"lane": "A", "attestation_text": "I made this recording"},
+        files={"file": ("tone.wav", b"RIFF", "audio/wav")},
+    )
+    assert response.status_code == 422
+
+
+def test_upload_rejects_wrong_magic_bytes() -> None:
+    response = client.post(
+        "/tracks/upload",
+        headers=HEADERS,
+        data={"lane": "A", "attestation_text": "I made this recording"},
+        files={"file": ("tone.wav", b"this is plain text, not audio at all", "audio/wav")},
+    )
+    assert response.status_code == 422
+
+
+def test_upload_rejects_playlist_with_remote_url() -> None:
+    playlist = b"#EXTM3U\n#EXTINF:-1,Remote\nhttp://evil.example.com/payload.wav\n"
+    response = client.post(
+        "/tracks/upload",
+        headers=HEADERS,
+        data={"lane": "A", "attestation_text": "I made this recording"},
+        files={"file": ("playlist.wav", playlist, "audio/wav")},
+    )
+    assert response.status_code == 422
+
+
+def test_upload_rejects_duration_bomb(tmp_path: Path) -> None:
+    ffmpeg = shutil.which("ffmpeg")
+    assert ffmpeg
+    out_path = tmp_path / "too_long.wav"
+    result = subprocess.run(
+        [
+            ffmpeg,
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=721",
+            "-ar",
+            "8000",
+            "-ac",
+            "1",
+            str(out_path),
+        ],
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+
+    with out_path.open("rb") as fh:
+        response = client.post(
+            "/tracks/upload",
+            headers=HEADERS,
+            data={"lane": "A", "attestation_text": "I made this recording"},
+            files={"file": ("tone.wav", fh, "audio/wav")},
+        )
+    assert response.status_code == 422
