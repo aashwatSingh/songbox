@@ -2,6 +2,88 @@
 
 Last updated: 2026-08-21.
 
+## Done — M3 complete
+
+M3's scope per `docs/PLAN.md` ("Demucs on the local GPU backend, segmented, four stems stored,
+benchmarked — real numbers into `docs/BENCHMARKS.md`, not estimates") is met, and verified: real
+CPU-measured speed numbers exist for both `htdemucs` and `htdemucs_ft`, and an end-to-end test
+proves four stems are actually stored (see below).
+
+What was built:
+- `stems` table + RLS, tenant-scoped like every other rights-relevant table in this schema.
+- `services/api/app/separation.py` — `separate_audio()`, a Demucs wrapper. Runs Demucs' segmented,
+  overlap-crossfade mode (`split=True`, `overlap=0.25`) so memory is bounded by segment length, not
+  track length; runs on GPU when available and falls back to CPU automatically otherwise. Per
+  `CLAUDE.md`'s "44.1kHz stereo WAV asserted at every stage boundary" requirement, every stem is
+  checked twice before the function returns: once against the model's declared sample
+  rate/channel count and the in-memory tensor's channel count, and again structurally — each
+  written WAV file is reopened with the stdlib `wave` module and its real on-disk
+  framerate/channel count checked, raising `SeparationError` on any mismatch. `out_dir` is cleaned
+  up on any failure partway through writing the four stems, so a mid-loop error doesn't leak a
+  temp directory.
+- `services/api/app/routes/tracks.py`'s `POST /tracks/{track_id}/separate` — gated on the track's
+  rights-gate status being `passed` (409 otherwise, and a test proves `separate_audio` is never
+  even called for a non-passed track, not just that the status code is right); re-detects the
+  stored file's format from its actual bytes rather than trusting anything client-supplied, same
+  reasoning as M2's upload path; stores all four resulting stems in MinIO and writes one `Stem` row
+  each. Bounded by a 1800s (30 minute) wall-clock timeout and a process-wide `threading.Lock` so
+  only one separation runs at a time in this single-process app — a second request either waits for
+  the lock or gets a 503 if the wait itself times out, and a run that exceeds the wall-clock bound
+  returns 504 (the background thread is left to finish on its own; CPU-bound torch inference can't
+  be cancelled from Python once started).
+- `services/api/scripts/benchmark_separation.py` + `docs/BENCHMARKS.md` — real, CPU-measured
+  numbers for both models, median of 3 isolated runs each (a single one-shot run under system
+  contention proved unreliable — see below): `htdemucs` 60.6s/2.97x realtime, `htdemucs_ft`
+  252.9s/0.71x realtime, against a synthetic 3-minute 440Hz tone (no rights clearance needed).
+
+56 tests pass (up from M2's 50); `ruff check .` and `mypy app` (strict) both clean.
+
+A final whole-branch review (independently re-running things against a live Postgres/MinIO/ffmpeg
+environment, not just reading the diff) found 11 real issues across the four already
+task-reviewed tasks, all fixed in one pass:
+- **Critical — the committed benchmark numbers didn't reproduce.** The original numbers (single
+  one-shot run per model, made while other test runs were happening concurrently on the same
+  machine) were off by 4.3x from a clean re-run (`htdemucs`: 256.6s/0.70x committed vs. 60.2s/2.99x
+  re-run). Fixed by re-measuring properly: 3 runs per model in isolation, reporting the median.
+  The benchmark script also leaked its `mkdtemp` stem directory on every call — two orphaned
+  121 MiB temp directories from the original runs were found and removed; the script now cleans up
+  after each timed run immediately.
+- **Critical — CI gates were red.** A `ruff` line-length violation and a `mypy` `attr-defined`
+  error (`demucs.api.save_audio` isn't actually exported from that module, only re-exported without
+  being in `__all__`; the real home is `demucs.audio.save_audio`) in `separation.py`.
+- **Important — the wall-clock timeout and concurrency lock above** (a real, human-made scope
+  decision: build this now rather than defer it, unlike the RQ queue below).
+- **Important — the end-to-end separation test never fetched stems back from MinIO**, only checked
+  DB rows and the storage-key prefix — a regression (wrong bucket, zero-byte upload, wrong format)
+  could have passed undetected. Fixed to fetch each stem's actual bytes and assert real 44.1kHz
+  stereo WAV data, mirroring what `tests/test_separation.py` already asserts for `separate_audio()`
+  directly.
+- **Important — `docs/STATUS.md` and `docs/BENCHMARKS.md`'s "no GPU available" wording, and the
+  ADR-0001 `gpu_backend` deferral, were all undocumented or wrong** — all three fixed as part of
+  this same pass (see below).
+- **Minor — the stem-writing loop's mid-failure cleanup and structural WAV assertion**, described
+  above; a temp-dir leak in `tests/test_separation.py`; an unbounded `torch` version floor
+  (`pyproject.toml` now pins `torch>=2.1,<3.0` / `torchaudio>=2.1,<3.0`).
+
+Deliberately deferred, matching the design spec's own scope decisions
+(`docs/superpowers/specs/2026-08-21-source-separation-design.md`):
+- **RQ/async job queue.** M3 is a synchronous `POST /tracks/{id}/separate` that blocks until Demucs
+  finishes, same shape as M1/M2's endpoints. Standing up real job orchestration (`workers/`,
+  currently empty) before a second pipeline stage exists to reveal what that orchestration actually
+  needs to handle would be premature — deferred until M4 (transcription) gives it a real second
+  stage to orchestrate.
+- **Quality comparison between `htdemucs` and `htdemucs_ft`.** Speed is now measured
+  (`docs/BENCHMARKS.md`); quality needs a real listening test with real songs and human judgment,
+  which stays `TODO: unmeasured` and out of scope for M3.
+- **Container-level GPU worker sandboxing.** M7's job per ADR-0001 — M3 runs on the same
+  unsandboxed local GPU backend M1/M2 always have.
+- **The ADR-0001 `gpu_backend` interface itself.** M3 is the first pipeline stage with a GPU call,
+  and it calls `demucs.api` directly from `services/api/app/routes/tracks.py` rather than through
+  the swappable interface ADR-0001 describes. This is now written down as a deliberate,
+  acknowledged deferral in `docs/adr/0001-gpu-backend-abstraction.md`'s "M3 update" — building the
+  interface against a single call site risked guessing its real shape wrong; revisit once M4 adds a
+  second GPU-calling stage.
+
 ## Done — M2 complete
 
 M2's own "done when" criterion (`docs/PLAN.md`: a malformed-file test suite — truncated headers,
@@ -248,20 +330,21 @@ findings, all fixed:
 
 ## In flight
 
-- Nothing mid-work right now. M0, M1, and M2 are all done. M3 (source separation) has not been
-  started.
+- Nothing mid-work right now. M0, M1, M2, and M3 are all done. M4 (transcription + alignment) has
+  not been started.
 
 ## Blocked
 
 - **No GitHub remote configured yet**, so `.github/workflows/ci.yml` has only been reasoned about, not
-  actually run by GitHub Actions. Not blocking M3 work, only CI-on-push.
+  actually run by GitHub Actions. Not blocking M4 work, only CI-on-push.
 
 ## Next three actions
 
-1. Start M3 (source separation): Whisper runs on the isolated vocal stem, never the full mix, per
-   `CLAUDE.md` — Demucs separation has to land before transcription does. M3 also needs to add the
-   44.1kHz-stereo-WAV normalization and stage-boundary assertion `CLAUDE.md` requires, since M2 left
-   audio un-normalized and unlabeled by format (see the M2 forward note above).
+1. Start M4 (transcription + alignment, per `docs/PLAN.md`): Whisper on the isolated vocal stem M3
+   now produces (never the full mix, per `CLAUDE.md`), wav2vec2 forced alignment, word timings with
+   confidence, the lyric correction editor, re-alignment on corrected text. This is also the
+   milestone that should revisit the ADR-0001 `gpu_backend` interface deferral M3 documented — a
+   second GPU-calling stage is what makes the interface's real shape clear.
 2. Push to a GitHub remote (once one exists) to get CI actually running.
 3. Get a real AcoustID API key, so `HTTPAcoustIDClient` can be exercised against the live service at
    least once instead of only the fixture double.

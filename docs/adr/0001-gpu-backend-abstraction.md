@@ -38,3 +38,16 @@ a config change, not a rewrite.
 - Cost-per-track figures produced during M0–M6 (if any are measured against `local`) are **not**
   representative of production cost — production cost is `TODO: unmeasured` until M7's real backend is
   live and benchmarked.
+
+### M3 update
+
+M3 (source separation) is the first pipeline stage that actually makes a GPU call, and it does so by
+calling `demucs.api` directly from `services/api/app/routes/tracks.py` (`separate_audio()` in
+`services/api/app/separation.py`) rather than through the `workers/gpu_backend.py` interface this ADR
+describes. This is a deliberate, acknowledged deferral, not an oversight: with only one call site, the
+interface's real shape (what it needs to abstract over `local` vs. `modal`/`runpod`, what belongs in
+the interface vs. in each stage) is a guess. M4 (transcription — Whisper) will add a second GPU-calling
+stage; once two real call sites exist, the actual common shape will be clear enough to extract the
+interface without guessing wrong. Revisit this deferral when M4 lands. Until then, `separate_audio()`
+selects `cuda` vs. `cpu` directly via `torch.cuda.is_available()`, matching the `local` backend's
+behavior described above but without going through a swappable interface.
