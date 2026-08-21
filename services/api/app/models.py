@@ -73,3 +73,18 @@ class FingerprintMatch(Base):
     # Resolution: no_match|held|confirmed|mismatch
     resolution: Mapped[str] = mapped_column(String(20), nullable=False)
     reviewer_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+
+
+class Stem(Base):
+    __tablename__ = "stems"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    track_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tracks.id"), nullable=False
+    )
+    # stem_type: "vocals" | "drums" | "bass" | "other"
+    stem_type: Mapped[str] = mapped_column(String(10), nullable=False)
+    storage_key: Mapped[str] = mapped_column(Text, nullable=False)
+    # model_name: "htdemucs" | "htdemucs_ft" -- which model variant actually produced this row
+    model_name: Mapped[str] = mapped_column(String(20), nullable=False)
