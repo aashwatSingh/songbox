@@ -12,6 +12,9 @@ dependencies = [
     "python-multipart>=0.0.9",
     "minio>=7.2",
     "httpx>=0.27",
+    "torch>=2.1",
+    "torchaudio>=2.1",
+    "demucs>=4.0",
 ]
 
 [project.optional-dependencies]
