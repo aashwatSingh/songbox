@@ -20,11 +20,14 @@ What was built:
 - `services/api/app/storage.py` — storage keys are now bare `f"{tenant_id}/{uuid4()}"`, with no
   client-supplied filename component at all (closes a gap M1's final review flagged and deferred
   here).
-- A 150MB upload cap (`MAX_UPLOAD_BYTES` in `services/api/app/routes/tracks.py`), read in chunks
-  with a running total rather than one `.read()` call, so an oversized upload is rejected without
-  first materializing the whole thing (plus a second unbounded copy) in memory. 150MB, not 100MB: a
-  12-minute 44.1kHz/16-bit stereo WAV — the max duration this pipeline accepts — is roughly 121MB, so
-  a 100MB cap would reject legitimate maximum-length uploads.
+- A 150 MiB upload cap (`MAX_UPLOAD_BYTES` in `services/api/app/routes/tracks.py`). Starlette has
+  already spooled the request body to disk before the handler runs, so the check seeks to the end of
+  the spooled file to get its size in O(1), rejects with 413 before reading anything if it's over the
+  limit, and only then does a single `.read()` — no chunk-and-join step, which an earlier version of
+  this cap used and which actually peaked at ~2x the payload in memory, worse than the one-shot read
+  it was meant to improve on. 150 MiB, not 100: a 12-minute 44.1kHz/16-bit stereo WAV — the max
+  duration this pipeline accepts — is ~121 MiB, so a 100 MiB cap would reject legitimate
+  maximum-length uploads.
 - The wiring in `services/api/app/routes/tracks.py`: magic-byte check and size cap run before any
   subprocess is spawned, the temp file's extension is derived from the *detected* format rather than
   the client-supplied filename (a client-controlled filename previously reached the filesystem via

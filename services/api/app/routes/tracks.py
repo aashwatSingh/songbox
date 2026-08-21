@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import uuid
 from datetime import UTC, datetime
@@ -19,33 +20,31 @@ from app.storage import get_minio_client, save_track_file
 from app.validation import detect_audio_format
 
 MAX_UPLOAD_BYTES = 150 * 1024 * 1024
-_UPLOAD_CHUNK_BYTES = 1024 * 1024
 
 
 def _read_upload_capped(upload: UploadFile, limit: int) -> bytes:
-    """Read an upload into memory, refusing anything past `limit`.
+    """Read an upload into memory, refusing anything larger than `limit` bytes.
 
-    Reads in chunks with a running total rather than one .read(): the single-shot form
-    materializes an unbounded second in-memory copy of whatever the client sent, on top of
-    the body Starlette has already spooled. Note this caps what WE buffer and process, not
-    raw ingress -- Starlette has already spooled the request body (to disk past its spool
-    threshold) before this handler runs, so a true ingress cap belongs at a reverse proxy or
-    ASGI middleware, not here.
+    Starlette has already spooled the whole request body before this handler runs (to disk
+    past its 1 MiB spool threshold), so `upload.file` is seekable and its size is available
+    in O(1) -- measure first, then read once. An earlier version accumulated 1 MiB chunks
+    with a running total instead; that was measurably worse, not better, because the chunk
+    list and the joined result are both live at the join, peaking at ~2x the payload versus
+    1x for a single read. Measuring up front rejects oversized input without allocating for
+    it at all.
+
+    This caps what WE buffer and process, not raw ingress -- the body already reached disk
+    before we got here. A true ingress cap belongs at a reverse proxy or in ASGI middleware.
     """
-    chunks: list[bytes] = []
-    total = 0
-    while True:
-        chunk = upload.file.read(_UPLOAD_CHUNK_BYTES)
-        if not chunk:
-            break
-        total += len(chunk)
-        if total > limit:
-            raise HTTPException(
-                status_code=413,
-                detail=f"file exceeds the {limit // (1024 * 1024)}MB upload limit",
-            )
-        chunks.append(chunk)
-    return b"".join(chunks)
+    upload.file.seek(0, os.SEEK_END)
+    size = upload.file.tell()
+    upload.file.seek(0)
+    if size > limit:
+        raise HTTPException(
+            status_code=413,
+            detail=f"file exceeds the {limit // (1024 * 1024)} MiB upload limit",
+        )
+    return upload.file.read()
 
 
 router = APIRouter()

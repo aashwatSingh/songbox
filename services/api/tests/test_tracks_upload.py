@@ -162,7 +162,9 @@ def test_upload_rejects_duration_bomb(tmp_path: Path) -> None:
 
 
 def test_upload_rejects_file_over_the_size_cap() -> None:
-    oversized = b"RIFF" + b"\x00" * 8 + b"WAVE" + b"\x00" * (151 * 1024 * 1024)
+    # Deliberately valid WAV magic bytes (RIFF at 0, WAVE at offset 8), so this proves the
+    # size cap fires on its own rather than the format check rejecting the payload anyway.
+    oversized = b"RIFF" + b"\x00" * 4 + b"WAVE" + b"\x00" * (151 * 1024 * 1024)
     response = client.post(
         "/tracks/upload",
         headers=HEADERS,

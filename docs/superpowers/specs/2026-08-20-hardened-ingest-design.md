@@ -101,12 +101,27 @@ and should not be described as, an independent layer defending against this clas
 
 M2's test suite includes a real crafted playlist file (`test_upload_rejects_playlist_with_remote_url`
 in `test_tracks_upload.py`), not just a code read — that payload is plain M3U8 text, so it's rejected
-at the magic-byte stage without ever reaching ffmpeg. Separately, live probing during the final
-whole-branch review went further: an ID3/frame-sync-prefixed `ffconcat` playlist was built that
-legitimately passes `detect_audio_format` as `"mp3"` and reaches ffmpeg's concat demuxer, and it was
-confirmed to still never reach the network, rejected by `-protocol_whitelist file` and the concat
-demuxer's `safe=1` default. That probe is what actually demonstrates the load-bearing defense; the
-checked-in test only demonstrates the hygiene filter doing its (more limited) job.
+at the magic-byte stage without ever reaching ffmpeg.
+
+Live probing during the final whole-branch review measured which layer actually stops what, against a
+real local listener, across all four combinations of the two defenses. Recording it precisely, because
+the earlier version of this section guessed and guessed wrong:
+
+- A **pure `ffconcat` playlist** referencing `http://` is where the two-layer claim genuinely holds.
+  With only `safe=1`: blocked (`Unsafe file name 'http://...'`). With only `-protocol_whitelist file`:
+  blocked (`Impossible to open 'http://...'`). With **both** disabled: the listener received a real
+  `GET /payload.wav`. So each layer blocks independently and egress requires defeating both. This
+  payload never passes `detect_audio_format` anyway.
+- An **ID3-prefixed `ffconcat` playlist** — which *does* pass `detect_audio_format` as `"mp3"` and
+  does cause ffmpeg to select the concat demuxer — is rejected by neither of those layers. It dies in
+  the concat *line parser* (`Line 1: unknown keyword 'ID3?'`) in all four configurations, including
+  with both defenses fully disabled. The prefix that gets it past the magic-byte filter is the same
+  prefix the parser chokes on: concat's probe skips the ID3 tag, but its parser re-reads from offset 0.
+
+That second bullet is an implementation accident of this ffmpeg version, not a designed defense, and
+no payload was found that both satisfies `detect_audio_format` and gets concat to parse a file
+directive. Do not treat it as protection — it is exactly why the magic-byte check stays classified as
+a hygiene filter above, and why `-protocol_whitelist file` must remain on both invocations.
 
 ## Data model / API surface changes
 
