@@ -29,3 +29,12 @@ def save_track_file(client: Minio, tenant_id: uuid.UUID, data: bytes) -> str:
     storage_key = f"{tenant_id}/{uuid.uuid4()}"
     client.put_object(_BUCKET, storage_key, io.BytesIO(data), length=len(data))
     return storage_key
+
+
+def fetch_track_file(client: Minio, storage_key: str) -> bytes:
+    response = client.get_object(_BUCKET, storage_key)
+    try:
+        return response.read()
+    finally:
+        response.close()
+        response.release_conn()

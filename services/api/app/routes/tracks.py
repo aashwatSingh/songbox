@@ -15,11 +15,13 @@ from app.auth import Identity, get_identity
 from app.db import get_db
 from app.fingerprint import FingerprintError, fingerprint_audio
 from app.gate import resolve_lane_outcome
-from app.models import FingerprintMatch, License, RightsDeclaration, Track
-from app.storage import get_minio_client, save_track_file
+from app.models import FingerprintMatch, License, RightsDeclaration, Stem, Track
+from app.separation import SeparationError, separate_audio
+from app.storage import fetch_track_file, get_minio_client, save_track_file
 from app.validation import detect_audio_format
 
 MAX_UPLOAD_BYTES = 150 * 1024 * 1024
+ALLOWED_SEPARATION_MODELS = ("htdemucs", "htdemucs_ft")
 
 
 def _read_upload_capped(upload: UploadFile, limit: int) -> bytes:
@@ -231,3 +233,85 @@ def confirm_attestation(
     db.add(stronger)
 
     return ConfirmAttestationResponse(track_id=track.id, status=track.status)
+
+
+class StemInfo(BaseModel):
+    stem_type: str
+    storage_key: str
+
+
+class SeparateRequest(BaseModel):
+    model_name: str = "htdemucs"
+
+
+class SeparateResponse(BaseModel):
+    track_id: uuid.UUID
+    stems: list[StemInfo]
+
+
+@router.post("/tracks/{track_id}/separate", response_model=SeparateResponse)
+def separate_track(
+    track_id: uuid.UUID,
+    body: SeparateRequest | None = None,
+    identity: Identity = Depends(get_identity),
+    db: Session = Depends(get_db),
+) -> SeparateResponse:
+    model_name = body.model_name if body is not None else "htdemucs"
+    if model_name not in ALLOWED_SEPARATION_MODELS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"model_name must be one of {ALLOWED_SEPARATION_MODELS}",
+        )
+
+    track = db.get(Track, track_id)
+    if track is None or track.tenant_id != identity.tenant_id:
+        raise HTTPException(status_code=404, detail="track not found")
+    if track.status != "passed":
+        raise HTTPException(
+            status_code=409,
+            detail=f"track has not passed the rights gate (status={track.status})",
+        )
+
+    minio_client = get_minio_client()
+    original_bytes = fetch_track_file(minio_client, track.storage_key)
+
+    # Re-detect format from the stored bytes rather than trusting anything client-supplied --
+    # same reasoning as upload_track: the suffix ffmpeg/Demucs use to pick a demuxer must come
+    # from the actual bytes, never from an attacker-controlled name.
+    audio_format = detect_audio_format(original_bytes)
+    if audio_format is None:
+        raise HTTPException(
+            status_code=422, detail="stored file no longer matches any accepted audio format"
+        )
+
+    tmp = tempfile.NamedTemporaryFile(suffix=f".{audio_format}", delete=False)
+    try:
+        tmp.write(original_bytes)
+        tmp.flush()
+        tmp.close()
+        try:
+            stem_paths = separate_audio(Path(tmp.name), model_name=model_name)
+        except SeparationError as exc:
+            raise HTTPException(
+                status_code=422, detail=f"could not separate audio: {exc}"
+            ) from exc
+    finally:
+        Path(tmp.name).unlink(missing_ok=True)
+
+    stems: list[StemInfo] = []
+    for stem_type, stem_path in stem_paths.items():
+        stem_bytes = stem_path.read_bytes()
+        storage_key = save_track_file(minio_client, identity.tenant_id, stem_bytes)
+        db.add(
+            Stem(
+                id=uuid.uuid4(),
+                tenant_id=identity.tenant_id,
+                track_id=track.id,
+                stem_type=stem_type,
+                storage_key=storage_key,
+                model_name=model_name,
+            )
+        )
+        stems.append(StemInfo(stem_type=stem_type, storage_key=storage_key))
+
+    return SeparateResponse(track_id=track.id, stems=stems)
