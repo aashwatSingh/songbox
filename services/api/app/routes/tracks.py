@@ -18,6 +18,36 @@ from app.models import FingerprintMatch, License, RightsDeclaration, Track
 from app.storage import get_minio_client, save_track_file
 from app.validation import detect_audio_format
 
+MAX_UPLOAD_BYTES = 150 * 1024 * 1024
+_UPLOAD_CHUNK_BYTES = 1024 * 1024
+
+
+def _read_upload_capped(upload: UploadFile, limit: int) -> bytes:
+    """Read an upload into memory, refusing anything past `limit`.
+
+    Reads in chunks with a running total rather than one .read(): the single-shot form
+    materializes an unbounded second in-memory copy of whatever the client sent, on top of
+    the body Starlette has already spooled. Note this caps what WE buffer and process, not
+    raw ingress -- Starlette has already spooled the request body (to disk past its spool
+    threshold) before this handler runs, so a true ingress cap belongs at a reverse proxy or
+    ASGI middleware, not here.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = upload.file.read(_UPLOAD_CHUNK_BYTES)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            raise HTTPException(
+                status_code=413,
+                detail=f"file exceeds the {limit // (1024 * 1024)}MB upload limit",
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 router = APIRouter()
 
 
@@ -48,13 +78,21 @@ def upload_track(
     if lane not in ("A", "B", "C"):
         raise HTTPException(status_code=422, detail="lane must be one of A, B, C")
 
-    data = file.file.read()
-    if detect_audio_format(data) is None:
+    if lane == "B" and license_id is None:
+        raise HTTPException(status_code=422, detail="lane B requires license_id")
+
+    data = _read_upload_capped(file, MAX_UPLOAD_BYTES)
+    audio_format = detect_audio_format(data)
+    if audio_format is None:
         raise HTTPException(status_code=422, detail="file does not match any accepted audio format")
     # delete=False + explicit close before fingerprinting: on Windows, NamedTemporaryFile
     # opens the file exclusively, so a subprocess (ffprobe/ffmpeg) can't open it while our
     # handle is still open. Close it first, then clean up manually in the finally block.
-    tmp = tempfile.NamedTemporaryFile(suffix=Path(file.filename or "upload").suffix, delete=False)
+    # The suffix comes from the DETECTED format, never from file.filename -- a client-supplied
+    # name can be over-long or contain characters the OS rejects, which raised an unhandled
+    # OSError/FileNotFoundError here (500) before the try block's cleanup could apply. It also
+    # kept the client in control of the extension hint ffmpeg uses to pick a demuxer.
+    tmp = tempfile.NamedTemporaryFile(suffix=f".{audio_format}", delete=False)
     try:
         tmp.write(data)
         tmp.flush()
@@ -70,8 +108,6 @@ def upload_track(
 
     license_covers_recording: bool | None = None
     if lane == "B":
-        if license_id is None:
-            raise HTTPException(status_code=422, detail="lane B requires license_id")
         license_row = db.get(License, license_id)
         if license_row is None or license_row.tenant_id != identity.tenant_id:
             raise HTTPException(status_code=422, detail="license_id not found for this tenant")

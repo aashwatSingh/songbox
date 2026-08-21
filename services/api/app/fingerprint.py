@@ -49,7 +49,7 @@ def fingerprint_audio(path: Path) -> Fingerprint:
         raise FingerprintError(f"ffprobe timed out after {exc.timeout}s") from exc
 
     if probe_result.returncode != 0 or not probe_result.stdout.strip():
-        raise FingerprintError(f"ffprobe could not read file info: {probe_result.stderr.strip()}")
+        raise FingerprintError("ffprobe could not read the file")
 
     probe_values: dict[str, str] = {}
     for line in probe_result.stdout.strip().splitlines():
@@ -92,7 +92,6 @@ def fingerprint_audio(path: Path) -> Fingerprint:
         raise FingerprintError(f"ffmpeg timed out after {exc.timeout}s") from exc
 
     if fp_result.returncode != 0 or not fp_result.stdout.strip():
-        stderr_msg = fp_result.stderr.decode(errors="replace").strip()
-        raise FingerprintError(f"ffmpeg could not fingerprint {path}: {stderr_msg}")
+        raise FingerprintError("ffmpeg could not fingerprint the file")
 
     return Fingerprint(value=fp_result.stdout.decode().strip(), duration_seconds=duration_seconds)

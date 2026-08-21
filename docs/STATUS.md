@@ -1,6 +1,61 @@
 # Status
 
-Last updated: 2026-08-20.
+Last updated: 2026-08-21.
+
+## Done — M2 complete
+
+M2's own "done when" criterion (`docs/PLAN.md`: a malformed-file test suite — truncated headers,
+wrong magic bytes, a playlist referencing a remote URL, a duration bomb — fully rejected) is met and
+actually verified, not just written — proven by `test_upload_rejects_truncated_header`,
+`test_upload_rejects_wrong_magic_bytes`, `test_upload_rejects_playlist_with_remote_url`, and
+`test_upload_rejects_duration_bomb` in `services/api/tests/test_tracks_upload.py`.
+
+What was built:
+- `services/api/app/validation.py` (new) — `detect_audio_format`, magic-byte detection for six
+  accepted formats (WAV, FLAC, MP3, M4A, OGG, AIFF) by binary signature, never by client-supplied
+  filename extension or `Content-Type`.
+- `services/api/app/fingerprint.py` hardening — a 720-second (12-minute) duration cap, a 2-stream
+  cap, 30-second timeouts on both the `ffprobe` and `ffmpeg` subprocess calls, and
+  `-protocol_whitelist file` on both.
+- `services/api/app/storage.py` — storage keys are now bare `f"{tenant_id}/{uuid4()}"`, with no
+  client-supplied filename component at all (closes a gap M1's final review flagged and deferred
+  here).
+- A 150MB upload cap (`MAX_UPLOAD_BYTES` in `services/api/app/routes/tracks.py`), read in chunks
+  with a running total rather than one `.read()` call, so an oversized upload is rejected without
+  first materializing the whole thing (plus a second unbounded copy) in memory. 150MB, not 100MB: a
+  12-minute 44.1kHz/16-bit stereo WAV — the max duration this pipeline accepts — is roughly 121MB, so
+  a 100MB cap would reject legitimate maximum-length uploads.
+- The wiring in `services/api/app/routes/tracks.py`: magic-byte check and size cap run before any
+  subprocess is spawned, the temp file's extension is derived from the *detected* format rather than
+  the client-supplied filename (a client-controlled filename previously reached the filesystem via
+  `tempfile.NamedTemporaryFile`'s `suffix=`, and an over-long or OS-invalid one raised an unhandled
+  500 before any cleanup could run — fixed in the final whole-branch review), and the lane-B
+  `license_id` presence check now runs before fingerprinting since it needs no DB access.
+
+50 tests pass (up from M1's 32); `ruff check .` and `mypy app` (strict) both clean.
+
+Deliberately deferred (recorded here, as `docs/superpowers/specs/2026-08-20-hardened-ingest-design.md`
+said this file would):
+- **Presigned direct-to-storage upload.** NOT built. M2 keeps M1's single multipart-request shape;
+  the original external build prompt called for a presign/finalize two-phase flow, but the user chose
+  to keep the existing shape instead. A real, acknowledged deviation from the original spec, not an
+  oversight.
+- **Container-level worker sandboxing** — no network-egress denial, no seccomp, no read-only root.
+  M2 only hardens the ffprobe/ffmpeg subprocess calls already living in `services/api` (argument
+  arrays, protocol whitelist, timeouts). Real sandboxing is M3's job, once real GPU worker
+  infrastructure exists to sandbox in the first place. Per `CLAUDE.md`, that guarantee is validated
+  against the real cloud (Modal/RunPod) backend, not the local dev GPU backend, which remains a plain
+  subprocess with resource limits.
+- **Loudness normalization to -14 LUFS and 44.1kHz-stereo internal-format normalization.** Neither is
+  in `docs/PLAN.md`'s M2 scope or its "done when," even though the original spec's §4.1 lists both —
+  deferred to whichever milestone first actually consumes a normalized format.
+
+Forward note for M3: `CLAUDE.md` requires that all internal audio is 44.1kHz stereo WAV, asserted at
+every stage boundary. M2 now accepts six different formats and stores each one un-normalized, exactly
+as uploaded — and does not record anywhere which of the six a given stored object actually is. M3's
+Demucs separation step will need to both normalize to 44.1kHz stereo WAV and add the assertion
+`CLAUDE.md` requires, and until a format column is added to `tracks`, it will have to re-probe the
+format from the stored object itself rather than reading it from a row.
 
 ## Done — M1 complete
 
@@ -190,19 +245,20 @@ findings, all fixed:
 
 ## In flight
 
-- Nothing mid-work right now. M0 and M1 are both done; M2 (hardened ingest) hasn't been started.
+- Nothing mid-work right now. M0, M1, and M2 are all done. M3 (source separation) has not been
+  started.
 
 ## Blocked
 
 - **No GitHub remote configured yet**, so `.github/workflows/ci.yml` has only been reasoned about, not
-  actually run by GitHub Actions. Not blocking M2 work, only CI-on-push.
+  actually run by GitHub Actions. Not blocking M3 work, only CI-on-push.
 
 ## Next three actions
 
-1. Push to a GitHub remote (once one exists) to get CI actually running.
-2. Decide whether to start M2 (hardened ingest: presigned upload, magic-byte validation, ffprobe
-   gating, sandboxed transcode, all security-section limits enforced) — 1 session per `docs/PLAN.md`,
-   *done when* a malformed-file test suite (truncated headers, wrong magic bytes,
-   playlist-with-remote-URL, duration bomb) is fully rejected.
-3. Get a real AcoustID API key before M2 wraps, so `HTTPAcoustIDClient` can be exercised against the
-   live service at least once instead of only the fixture double.
+1. Start M3 (source separation): Whisper runs on the isolated vocal stem, never the full mix, per
+   `CLAUDE.md` — Demucs separation has to land before transcription does. M3 also needs to add the
+   44.1kHz-stereo-WAV normalization and stage-boundary assertion `CLAUDE.md` requires, since M2 left
+   audio un-normalized and unlabeled by format (see the M2 forward note above).
+2. Push to a GitHub remote (once one exists) to get CI actually running.
+3. Get a real AcoustID API key, so `HTTPAcoustIDClient` can be exercised against the live service at
+   least once instead of only the fixture double.

@@ -158,3 +158,16 @@ def test_upload_rejects_duration_bomb(tmp_path: Path) -> None:
             files={"file": ("tone.wav", fh, "audio/wav")},
         )
     assert response.status_code == 422
+    assert "duration" in response.json()["detail"]
+
+
+def test_upload_rejects_file_over_the_size_cap() -> None:
+    oversized = b"RIFF" + b"\x00" * 8 + b"WAVE" + b"\x00" * (151 * 1024 * 1024)
+    response = client.post(
+        "/tracks/upload",
+        headers=HEADERS,
+        data={"lane": "A", "attestation_text": "I made this recording"},
+        files={"file": ("tone.wav", oversized, "audio/wav")},
+    )
+    assert response.status_code == 413
+    assert "upload limit" in response.json()["detail"]

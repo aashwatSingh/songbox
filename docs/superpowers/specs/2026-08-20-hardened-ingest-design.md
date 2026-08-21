@@ -84,11 +84,29 @@ return code.
 ### 5. "Playlist with remote URL" — already closed, verified not reopened
 
 `-protocol_whitelist file` is already present on both the `ffmpeg` and `ffprobe` calls in
-`fingerprint.py` (the `ffprobe` one was added during M1's final review). Combined with the
-magic-byte check (a crafted M3U8/concat playlist text file doesn't match any of the six binary
-signatures above, so it's rejected before ever reaching ffmpeg), this closes the SSRF class in two
-independent layers. M2's test suite proves this with a real crafted playlist file, not just a code
-read.
+`fingerprint.py` (the `ffprobe` one was added during M1's final review). This flag is the actual
+load-bearing defense against a crafted playlist reaching the network: without it, ffmpeg's nested
+demuxers default to `file,crypto,data` on the protocol whitelist, so `-protocol_whitelist file`
+genuinely narrows what a probed file can make ffmpeg/ffprobe touch (verified directly). The concat
+demuxer's own `safe=1` default additionally rejects non-local paths even within the `file` protocol.
+Together these two are what close the SSRF class — not the magic-byte check.
+
+The magic-byte check is a **hygiene filter, not a security boundary**: it cheaply rejects
+obviously-wrong input before any subprocess is spawned, but it does not defend against a crafted
+playlist reaching the network. The MP3 branch, for example, accepts any file starting with `0xFF`
+followed by a byte with its top 3 bits set — trivial for an attacker to prepend to an
+otherwise-arbitrary payload (a live-built ID3/frame-sync-prefixed `ffconcat` playlist passes
+`detect_audio_format` as `"mp3"` and still causes ffmpeg to select the concat demuxer). It is not,
+and should not be described as, an independent layer defending against this class of attack.
+
+M2's test suite includes a real crafted playlist file (`test_upload_rejects_playlist_with_remote_url`
+in `test_tracks_upload.py`), not just a code read — that payload is plain M3U8 text, so it's rejected
+at the magic-byte stage without ever reaching ffmpeg. Separately, live probing during the final
+whole-branch review went further: an ID3/frame-sync-prefixed `ffconcat` playlist was built that
+legitimately passes `detect_audio_format` as `"mp3"` and reaches ffmpeg's concat demuxer, and it was
+confirmed to still never reach the network, rejected by `-protocol_whitelist file` and the concat
+demuxer's `safe=1` default. That probe is what actually demonstrates the load-bearing defense; the
+checked-in test only demonstrates the hygiene filter doing its (more limited) job.
 
 ## Data model / API surface changes
 
