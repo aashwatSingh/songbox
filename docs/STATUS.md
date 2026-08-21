@@ -84,6 +84,20 @@ Deliberately deferred, matching the design spec's own scope decisions
   interface against a single call site risked guessing its real shape wrong; revisit once M4 adds a
   second GPU-calling stage.
 
+Known limitations, not fixed in M3 (found during the final review's re-verification, judged too
+small individually to block merge, but real):
+- **A 504 (separation-timeout) response releases the lock while the runaway thread is still
+  running**, since CPU-bound torch inference can't be cancelled from Python. Under sustained
+  overload (only reachable past the 30-minute timeout, i.e. a machine already in trouble), a fresh
+  request can acquire the lock and start a second concurrent Demucs run alongside the orphaned one,
+  and the orphan's temp stem directory has nothing to clean it up. The real fix is the deliberately
+  deferred RQ/worker queue above, which can actually track and cancel in-flight jobs; noting this
+  now so it isn't rediscovered from scratch when that queue is built.
+- **No test exercises the 503 (lock-busy) path or proves requests are genuinely serialized** — both
+  were verified manually during the final review (a concurrent-request probe showed
+  `max_concurrent=1` and the lock releasing correctly on both the exception and timeout paths), but
+  no automated test would catch a regression that silently removed the lock.
+
 ## Done — M2 complete
 
 M2's own "done when" criterion (`docs/PLAN.md`: a malformed-file test suite — truncated headers,
@@ -127,10 +141,11 @@ said this file would):
   oversight.
 - **Container-level worker sandboxing** — no network-egress denial, no seccomp, no read-only root.
   M2 only hardens the ffprobe/ffmpeg subprocess calls already living in `services/api` (argument
-  arrays, protocol whitelist, timeouts). Real sandboxing is M3's job, once real GPU worker
-  infrastructure exists to sandbox in the first place. Per `CLAUDE.md`, that guarantee is validated
-  against the real cloud (Modal/RunPod) backend, not the local dev GPU backend, which remains a plain
-  subprocess with resource limits.
+  arrays, protocol whitelist, timeouts). Real sandboxing is M7's job per `docs/adr/0001-gpu-backend-
+  abstraction.md` (M3 added the first real GPU-calling stage, Demucs separation, but still runs it
+  as a plain in-process call on the `local` dev backend, not a sandboxed worker). Per `CLAUDE.md`,
+  that guarantee is validated against the real cloud (Modal/RunPod) backend, not the local dev GPU
+  backend, which remains a plain subprocess/call with resource limits.
 - **Loudness normalization to -14 LUFS and 44.1kHz-stereo internal-format normalization.** Neither is
   in `docs/PLAN.md`'s M2 scope or its "done when," even though the original spec's §4.1 lists both —
   deferred to whichever milestone first actually consumes a normalized format.

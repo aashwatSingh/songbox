@@ -32,6 +32,11 @@ GPU numbers: `TODO: unmeasured`. The design spec's point for this table was comp
 original "~1-2x realtime on GPU" claim; a CPU-only run cannot make that comparison, so this is
 called out explicitly rather than silently omitted.
 
+Each timed run includes `Separator` construction (model weight load off disk), not inference
+alone — this matches the real per-request cost of `POST /tracks/{id}/separate`, which also builds
+a fresh `Separator` per call, so the realtime factor above is an honest request-level number
+rather than a pure-inference one.
+
 Quality comparison between `htdemucs` and `htdemucs_ft`: `TODO: unmeasured` — needs a real
 listening test with real songs and human judgment, out of scope for M3 (see
 `docs/superpowers/specs/2026-08-21-source-separation-design.md`).

@@ -27,11 +27,12 @@ ALLOWED_SEPARATION_MODELS = ("htdemucs", "htdemucs_ft")
 
 # M2 capped tracks at 12 minutes (fingerprint.py's MAX_DURATION_SECONDS) and gave ffprobe/ffmpeg
 # 30s subprocess timeouts. Demucs separation is much slower than an ffprobe call, and this
-# machine's real measured rate (see docs/BENCHMARKS.md) is CPU-only -- roughly 0.3x-0.4x realtime
-# depending on model, meaning a full 12-minute track could take on the order of 30-45 minutes of
-# wall clock on CPU. 30 minutes is generous headroom for CPU-bound inference at today's measured
-# rates without being unbounded; on a real GPU (once the CUDA torch build lands) this would be a
-# small fraction of that. Revisit downward once GPU inference is the norm for this endpoint.
+# machine's real measured rate (see docs/BENCHMARKS.md, median of 3 isolated runs) is CPU-only --
+# 2.97x realtime for htdemucs, 0.71x for htdemucs_ft, meaning a full 12-minute track could take on
+# the order of 4-17 minutes of wall clock on CPU depending on model. 30 minutes leaves comfortable
+# headroom over the slower model's worst case without being unbounded; on a real GPU (once the
+# CUDA torch build lands) this would be a small fraction of that. Revisit downward once GPU
+# inference is the norm for this endpoint.
 SEPARATION_TIMEOUT_SECONDS = 1800
 
 # Only one Demucs run at a time in this single-process synchronous FastAPI app -- prevents
