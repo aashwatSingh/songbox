@@ -10,7 +10,7 @@ def test_save_track_file_round_trips_through_minio() -> None:
     tenant_id = uuid.uuid4()
     data = b"not real audio, just test bytes"
 
-    storage_key = save_track_file(client, tenant_id, "song.wav", data)
+    storage_key = save_track_file(client, tenant_id, data)
 
     assert storage_key.startswith(f"{tenant_id}/")
     response = client.get_object("songbox-tracks", storage_key)

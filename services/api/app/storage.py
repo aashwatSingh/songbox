@@ -21,8 +21,11 @@ def ensure_bucket(client: Minio) -> None:
         client.make_bucket(_BUCKET)
 
 
-def save_track_file(client: Minio, tenant_id: uuid.UUID, filename: str, data: bytes) -> str:
+def save_track_file(client: Minio, tenant_id: uuid.UUID, data: bytes) -> str:
+    """Storage key is bare tenant_id/uuid4 -- no client-supplied filename component at all, so
+    nothing about the key is attacker-influenced (M1 originally appended the raw filename; that
+    was flagged as an unnecessary risk and removed here)."""
     ensure_bucket(client)
-    storage_key = f"{tenant_id}/{uuid.uuid4()}-{filename}"
+    storage_key = f"{tenant_id}/{uuid.uuid4()}"
     client.put_object(_BUCKET, storage_key, io.BytesIO(data), length=len(data))
     return storage_key
