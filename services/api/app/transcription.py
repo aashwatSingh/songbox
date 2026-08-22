@@ -86,9 +86,13 @@ def transcribe_audio(path: Path, model_size: str = DEFAULT_WHISPER_MODEL_SIZE) -
             )
             idx += 1
 
-    if not words:
-        raise TranscriptionError("transcription produced no words")
-
+    # No speech detected is a legitimate empty result, not an error -- an instrumental-only
+    # track, a near-silent vocals stem after separation, or (in tests) a synthetic tone are all
+    # real, valid input. faster-whisper still identifies a language from an initial audio window
+    # independent of segmentation/VAD (confirmed empirically: info.language is a valid non-empty
+    # code even when zero segments are found), so there is nothing to raise here -- just return
+    # the empty result and let the caller (run_transcription_and_alignment) decide what to do
+    # with zero words.
     return Transcript(text=" ".join(text_parts).strip(), language=info.language, words=words)
 
 
@@ -201,7 +205,14 @@ def run_transcription_and_alignment(path: Path, model_size: str) -> Transcriptio
     timings, since the alignment model here only covers English (see the design spec's
     licensing-blocked-multilingual-aligner scope decision)."""
     transcript = transcribe_audio(path, model_size=model_size)
-    if transcript.language == ENGLISH_LANGUAGE_CODE:
+    if not transcript.words:
+        # No speech detected at all -- aligning empty text is meaningless (align_words() would
+        # just raise AlignmentError on it), and there is trivially nothing for wav2vec2 to have
+        # changed, so "whisper_native" is the right label here just as it is for the
+        # non-English/no-alignment-coverage case below.
+        words = transcript.words
+        aligner = "whisper_native"
+    elif transcript.language == ENGLISH_LANGUAGE_CODE:
         words = align_words(path, transcript.text)
         aligner = "wav2vec2"
     else:
