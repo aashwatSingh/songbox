@@ -30,20 +30,38 @@ deliberately deviates.** M4a measures against **JamendoLyrics Multi-Lang** (the 
 to the deprecated `f90/jamendolyrics` repository), a Creative Commons benchmark with *manually*
 annotated word-level timings covering English, German, French, and Spanish.
 
-Four reasons this is better evidence than a self-made set, not merely cheaper:
+Three reasons this is better evidence than a self-made set, not merely cheaper:
 
 1. **Independent ground truth.** Labels we produce ourselves, after seeing our own tool's output, are
    not independent of the tool. The published annotations are.
-2. **Rights-clean by construction.** CC-licensed audio genuinely passes this project's own Lane C
-   gate. Sourcing ten hand-labeled tracks otherwise means solving a rights problem first.
-3. **It answers an open question for free.** `docs/PLAN.md` open question 2 ("non-English vocal
+2. **It answers an open question for free.** `docs/PLAN.md` open question 2 ("non-English vocal
    alignment: what degrades, and what's the fallback?") requires at least one non-English track.
    JamendoLyrics Multi-Lang supplies three non-English languages.
-4. **Comparability.** It is a standard benchmark, so our number can be sanity-checked against
+3. **Comparability.** It is a standard benchmark, so our number can be sanity-checked against
    published results. M3's final review caught a committed benchmark that was 4.3x wrong; an
    externally comparable baseline is a direct guard against repeating that.
 
-This deviation is recorded here and must be recorded in `docs/STATUS.md`, not silently assumed.
+**Correction — this is not "rights-clean by construction."** An earlier version of this section
+claimed the Creative Commons licensing made this dataset a straightforward Lane C fit. Checking the
+dataset's actual `license_type` field before writing the eval task disproved that: most tracks are
+**CC BY-NC-ND / CC BY-NC-SA** — non-commercial, and ND ("No Derivatives") specifically forbids
+creating derivative works, which running Demucs separation and forced alignment on the audio is. This
+is not the product's Lane C path and must never be treated as one — no track from this dataset may be
+uploaded through `/tracks/upload` or stored via the product's own pipeline.
+
+What actually makes this defensible is narrower and is now a hard constraint on the eval harness, not
+an assumption: `scripts/eval_alignment.py` downloads audio to an ephemeral temp directory, runs the
+pipeline for scoring only, and deletes every derived artifact (separated stems, alignment output,
+the source audio itself) immediately after scoring a track — only the aggregate error numbers are
+ever committed, to `docs/BENCHMARKS.md`. Nothing from this dataset is stored, served, or exposed
+through the product. On top of that, any track whose `license_type` contains `"ND"` is skipped
+entirely, so the No-Derivatives question doesn't arise even for the tracks the eval actually touches.
+This is a real, human-made decision, not a default — recorded here and in `docs/STATUS.md`.
+
+This is also distinct from `CLAUDE.md`'s "no paste-a-link, no arbitrary third-party media fetch" rule:
+that rule governs the *product's* ingestion path exposed to users. `scripts/eval_alignment.py` is a
+developer-run internal tool with no user-facing surface, a single pinned dataset name, and no ability
+to fetch an arbitrary URL — not a fourth ingress lane.
 
 ### Scope decision: the multilingual aligner is license-blocked
 
@@ -200,9 +218,16 @@ timeout → 504.
 
 ### 6. `scripts/eval_alignment.py` and the M4 section of `docs/BENCHMARKS.md`
 
-Runs the pipeline over JamendoLyrics Multi-Lang and reports **median absolute word-onset error** and
+Runs the pipeline over JamendoLyrics Multi-Lang (loaded via the `datasets` library,
+`jamendolyrics/jamendolyrics` on Hugging Face) and reports **median absolute word-onset error** and
 **percentage of words within ±50ms**, broken out per language, into `docs/BENCHMARKS.md`. Real
 measured numbers only; `TODO: unmeasured` for anything not actually run.
+
+Per the licensing correction above, this script is held to two hard rules, not left to a future
+reader's judgment: skip any row whose `license_type` field contains `"ND"` before processing it, and
+delete every artifact derived from a track's audio (temp audio file, separated stems, alignment
+output) immediately after that track is scored — nothing survives the run except the aggregate
+numbers written to `docs/BENCHMARKS.md`.
 
 The primary measurement force-aligns the **reference lyrics**, not Whisper's transcript. This is
 deliberate and matters for three reasons: the ±50ms criterion is about aligner precision rather than
