@@ -51,3 +51,13 @@ stage; once two real call sites exist, the actual common shape will be clear eno
 interface without guessing wrong. Revisit this deferral when M4 lands. Until then, `separate_audio()`
 selects `cuda` vs. `cpu` directly via `torch.cuda.is_available()`, matching the `local` backend's
 behavior described above but without going through a swappable interface.
+
+### M4a update
+
+The deferral above ended here, as planned. `services/api/app/gpu_backend.py` now provides the
+`local` backend's `run_inference()` interface this ADR describes: one process-wide inference job
+at a time, bounded by a caller-supplied wall-clock timeout. M3's `separate_audio()` call in
+`services/api/app/routes/tracks.py` was retrofitted to go through it (Task 1 of
+`docs/superpowers/plans/2026-08-21-alignment-engine.md`), and M4a's transcription/alignment calls
+(Task 4 of the same plan) use it from the start. The `modal`/`runpod` implementations remain M7's
+work.

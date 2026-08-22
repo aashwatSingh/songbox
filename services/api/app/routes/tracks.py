@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
-import threading
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,6 +16,7 @@ from app.auth import Identity, get_identity
 from app.db import get_db
 from app.fingerprint import FingerprintError, fingerprint_audio
 from app.gate import resolve_lane_outcome
+from app.gpu_backend import BackendBusyError, BackendTimeoutError, run_inference
 from app.models import FingerprintMatch, License, RightsDeclaration, Stem, Track
 from app.separation import SeparationError, separate_audio
 from app.storage import fetch_track_file, get_minio_client, save_track_file
@@ -34,14 +34,6 @@ ALLOWED_SEPARATION_MODELS = ("htdemucs", "htdemucs_ft")
 # CUDA torch build lands) this would be a small fraction of that. Revisit downward once GPU
 # inference is the norm for this endpoint.
 SEPARATION_TIMEOUT_SECONDS = 1800
-
-# Only one Demucs run at a time in this single-process synchronous FastAPI app -- prevents
-# multiple concurrent /separate requests from each kicking off a full model load + inference pass
-# with no serialization, which would contend for CPU/GPU and memory. A single process-wide Lock is
-# sufficient for M3's single-process deployment; a distributed/Redis-based lock is out of scope
-# until this runs as more than one process (the RQ/worker-queue milestone, deliberately deferred
-# per docs/superpowers/specs/2026-08-21-source-separation-design.md).
-_separation_lock = threading.Lock()
 
 
 def _read_upload_capped(upload: UploadFile, limit: int) -> bytes:
@@ -269,41 +261,6 @@ class SeparateResponse(BaseModel):
     stems: list[StemInfo]
 
 
-def _separate_audio_with_timeout(path: Path, model_name: str) -> dict[str, Path]:
-    """Run `separate_audio()` on a helper thread and bound it to `SEPARATION_TIMEOUT_SECONDS` of
-    wall clock. FastAPI's sync routes already run in a threadpool, so blocking the calling thread
-    on `Thread.join(timeout=...)` here is fine -- it doesn't block the event loop.
-
-    Limitation: CPU-bound torch inference cannot be cancelled from Python once started. If the
-    timeout fires, this raises HTTPException(504) but the background thread keeps running to
-    completion (or failure) on its own -- there is no way to kill it short of a subprocess-based
-    redesign, which is out of scope here. Its result (or the temp stem directory it may still
-    write) is simply discarded when it eventually finishes.
-    """
-    outcome: dict[str, object] = {}
-
-    def _target() -> None:
-        try:
-            outcome["value"] = separate_audio(path, model_name=model_name)
-        except BaseException as exc:  # noqa: BLE001 -- re-raised on the calling thread below
-            outcome["error"] = exc
-
-    thread = threading.Thread(target=_target, daemon=True)
-    thread.start()
-    thread.join(timeout=SEPARATION_TIMEOUT_SECONDS)
-    if thread.is_alive():
-        raise HTTPException(status_code=504, detail="separation timed out")
-
-    if "error" in outcome:
-        error = outcome["error"]
-        assert isinstance(error, BaseException)
-        raise error
-
-    value = outcome["value"]
-    assert isinstance(value, dict)
-    return value
-
-
 @router.post("/tracks/{track_id}/separate", response_model=SeparateResponse)
 def separate_track(
     track_id: uuid.UUID,
@@ -345,19 +302,19 @@ def separate_track(
         tmp.flush()
         tmp.close()
 
-        # Only one Demucs run at a time (see _separation_lock's module-level comment). Wait up
-        # to SEPARATION_TIMEOUT_SECONDS for the lock itself, too -- a request that can't even
-        # start within that window is no better off than one that starts and then times out.
-        if not _separation_lock.acquire(timeout=SEPARATION_TIMEOUT_SECONDS):
-            raise HTTPException(status_code=503, detail="separation is busy, try again")
         try:
-            stem_paths = _separate_audio_with_timeout(Path(tmp.name), model_name=model_name)
+            stem_paths = run_inference(
+                lambda: separate_audio(Path(tmp.name), model_name=model_name),
+                timeout_seconds=SEPARATION_TIMEOUT_SECONDS,
+            )
+        except BackendBusyError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except BackendTimeoutError as exc:
+            raise HTTPException(status_code=504, detail=str(exc)) from exc
         except SeparationError as exc:
             raise HTTPException(
                 status_code=422, detail=f"could not separate audio: {exc}"
             ) from exc
-        finally:
-            _separation_lock.release()
     finally:
         Path(tmp.name).unlink(missing_ok=True)
 
