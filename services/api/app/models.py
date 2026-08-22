@@ -88,3 +88,23 @@ class Stem(Base):
     storage_key: Mapped[str] = mapped_column(Text, nullable=False)
     # model_name: "htdemucs" | "htdemucs_ft" -- which model variant actually produced this row
     model_name: Mapped[str] = mapped_column(String(20), nullable=False)
+
+
+class Transcription(Base):
+    __tablename__ = "transcriptions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    track_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tracks.id"), nullable=False
+    )
+    # whisper_model: which faster-whisper size produced this row, e.g. "base"
+    whisper_model: Mapped[str] = mapped_column(String(20), nullable=False)
+    # aligner: "wav2vec2" | "whisper_native"
+    aligner: Mapped[str] = mapped_column(String(20), nullable=False)
+    # language: Whisper's detected ISO language code, e.g. "en"
+    language: Mapped[str] = mapped_column(String(10), nullable=False)
+    lyrics_display_allowed: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    # words: [{"idx": int, "text": str, "start_ms": int, "end_ms": int, "confidence": float}, ...]
+    words: Mapped[list[dict[str, object]]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

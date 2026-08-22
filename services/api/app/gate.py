@@ -78,3 +78,16 @@ def resolve_lane_outcome(
         )
 
     raise ValueError(f"unknown lane: {lane!r}")
+
+
+def resolve_lyrics_display_allowed(lane: str, license_covers_lyrics: bool | None) -> bool:
+    """Lyric display rights are tracked separately from recording rights (CLAUDE.md). Lane A
+    (creator-owned) and Lane C (public domain / Creative Commons) always allow lyric display.
+    Lane B (licensed) allows it only if the license on file explicitly covers lyrics -- a
+    license that covers the recording but not the lyrics is a real, supported case, and missing
+    lyric clearance is a supported degraded state (timings without text), not an error."""
+    if lane in ("A", "C"):
+        return True
+    if lane == "B":
+        return bool(license_covers_lyrics)
+    raise ValueError(f"unknown lane: {lane!r}")
