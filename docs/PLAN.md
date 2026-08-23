@@ -72,11 +72,26 @@ Each ends with working, tested, committed code and an updated `STATUS.md`.
   playlist-with-remote-URL, duration bomb) is fully rejected.
 - **M3 — Separation (1 session).** Demucs on the local GPU backend, segmented, four stems stored,
   benchmarked (real numbers into `docs/BENCHMARKS.md`, not estimates).
-- **M4 — Transcription + alignment (3 sessions, may run longer — see risk note below).** Whisper on the
-  vocal stem, wav2vec2 forced alignment, word timings with confidence, the lyric correction editor,
-  re-alignment on corrected text.
-  *Done when:* measured word-onset error is within ±50ms median on a hand-labeled 10-track set built
-  during this milestone.
+- **M4 — Transcription + alignment (3 sessions, may run longer — see risk note below).** Split into two
+  sub-milestones during brainstorming, since the original scope bundled backend ML, an accuracy-
+  measurement deliverable, and this repo's first real frontend surface into one unit:
+  - **M4a — Alignment engine (done, see `docs/STATUS.md`).** Whisper on the vocal stem, wav2vec2
+    forced alignment, word timings with confidence, and the eval harness that measures accuracy
+    against a real public benchmark (JamendoLyrics Multi-Lang) instead of a hand-labeled set — a
+    deliberate, documented deviation from the original "hand-labeled 10-track set" plan, made for
+    independence/comparability, not convenience (see the design spec's licensing correction).
+    *Done when:* measured word-onset error is within ±50ms median. **Measured, not met**: the real
+    result is 68.2ms median / 37.2% of words within 50ms (English, wav2vec2-aligned, 2,188 words
+    across 40 real tracks — see `docs/BENCHMARKS.md`'s M4 section). Human decision: merge M4a as
+    engineering-complete with this gap documented, not silently closed; closing it is real,
+    open-ended follow-up work (candidates: a larger wav2vec2 variant, checking whether the
+    separated vocal stem's audio quality degrades alignment precision vs. the original mix, or a
+    systematic bias in the frame-to-millisecond conversion), tracked as open question 5 below —
+    not a blocker for M4b or M5, but real work that should land before the player's word-highlight
+    UX (M6) depends on tight timing.
+  - **M4b — Lyric correction editor (not started).** The lyric correction editor UI and
+    re-alignment on corrected text — this repo's first real frontend work (`apps/web` is still the
+    unmodified Next.js starter as of M4a). Needs its own brainstorm/spec/plan cycle.
 - **M5 — Pitch + structure (1 session).** CREPE contour, beat grid, sections, `karaoke.json` v1 emitted
   and schema-validated.
 - **M6 — Player (3+ sessions — see risk note).** Web Audio playback, word highlight, pitch lane, live
@@ -106,16 +121,31 @@ milestone reaches them):
 
 1. Demucs quality/speed: is `htdemucs_ft` worth ~4× `htdemucs`'s inference time here? Needs a listening
    test, not a guess — do this in M3.
-2. Non-English vocal alignment: what degrades, and what's the fallback? Needs at least one non-English
-   track in the M4 eval set.
-3. AcoustID false-negative rate on independent/unreleased music: is it acceptable given the gate exists
+2. AcoustID false-negative rate on independent/unreleased music: is it acceptable given the gate exists
    to catch *commercial* leakage, not to be a complete catalog match? Measure during M1.
-4. Live pitch detection under speaker/mic bleed: which algorithm survives a phone mic in a room with the
+3. Live pitch detection under speaker/mic bleed: which algorithm survives a phone mic in a room with the
    backing track playing out loud? Open through M6.
-5. Cost per track end-to-end, at what GPU instance size, and where that puts the price floor. Only
+4. Cost per track end-to-end, at what GPU instance size, and where that puts the price floor. Only
    answerable once M7's real cloud backend is wired up and benchmarked — `TODO: unmeasured` until then.
+5. **New in M4a.** Alignment accuracy is 68.2ms median (37.2% within 50ms), missing the ±50ms target —
+   what closes the gap? Candidates, none yet tried: a larger wav2vec2 variant
+   (`WAV2VEC2_ASR_LARGE_LV60K_960H`), checking whether the separated vocal stem's audio quality
+   (post-Demucs artifacts) degrades alignment precision versus aligning against the original mix, or
+   a systematic bias in the frame-to-millisecond conversion. Real data only, per usual — no guessing
+   which fix will work before trying it. Not a blocker for M4b/M5; should land before M6's word-
+   highlight UX depends on tight timing.
 
 Resolved during this planning pass (see `docs/DECISIONS_LOG.md` for full reasoning):
 
 6. Local infra without Docker installed → Docker Desktop on WSL2, install before M0.
 7. Dev-time GPU strategy → local GPU through M0–M6, Modal/RunPod deferred to M7.
+
+Resolved with real data during a milestone:
+
+8. Non-English vocal alignment: what degrades, and what's the fallback? Measured in M4a against
+   JamendoLyrics Multi-Lang's German/Spanish/French tracks via the `whisper_native` fallback path
+   (no forced-alignment model covers those languages — see the design spec's licensing-blocked-
+   multilingual-aligner scope decision): median error 124.4ms (de) / 137.2ms (es) / 135.6ms (fr),
+   all worse than English's already-missed 50ms target, with a ~51% word-match rate against
+   reference lyrics via difflib reconciliation. The fallback works end to end but is measurably
+   worse than the (also currently insufficient) English path — see `docs/BENCHMARKS.md`.
