@@ -134,23 +134,39 @@ def align_words(path: Path, text: str) -> list[Word]:
         model = _WAV2VEC2_BUNDLE.get_model().to(device)
         model.eval()
     except Exception as exc:
-        raise AlignmentError(f"could not load alignment model: {exc}") from exc
+        raise AlignmentError("could not load alignment model") from exc
 
     labels = _WAV2VEC2_BUNDLE.get_labels()
-    dictionary = {c: i for i, c in enumerate(labels)}
+    # Exclude the CTC blank ('-', index 0) and word-separator ('|', index 1) labels -- these are
+    # structural tokens the model uses internally, not alignable characters. Including them here
+    # meant any word containing a literal hyphen (e.g. "well-known") tokenized to include index 0,
+    # and torchaudio.functional.forced_align(..., blank=0) rejects any target tensor that contains
+    # the blank index outright. This mirrors torchaudio's own bundle.get_dict() helper, which
+    # excludes both for the same reason.
+    dictionary = {c: i for i, c in enumerate(labels) if c not in ("-", "|")}
 
+    # Words that reduce to zero alignable characters (a bare numeral like "1979", the "♪" symbol
+    # Whisper sometimes emits for music passages, punctuation-only tokens, ...) are dropped from
+    # the alignment target rather than failing the whole request -- one unalignable word in an
+    # otherwise-good transcript shouldn't cost every other word its timing (same reasoning as
+    # transcribe_audio() treating "no speech found" as a legitimate degraded result rather than an
+    # error). Only if EVERY word is unalignable is there truly nothing to align.
     tokens_per_word: list[list[int]] = []
+    alignable_words: list[str] = []
     for word in words_text:
         word_tokens = [dictionary[c] for c in word.upper() if c in dictionary]
         if not word_tokens:
-            raise AlignmentError("transcript contains a word with no alignable characters")
+            continue
         tokens_per_word.append(word_tokens)
+        alignable_words.append(word)
+    if not tokens_per_word:
+        raise AlignmentError("transcript contains no alignable characters")
     flat_tokens = [t for word_tokens in tokens_per_word for t in word_tokens]
 
     try:
         waveform, sample_rate = _load_waveform(path)
     except Exception as exc:
-        raise AlignmentError(f"could not load audio: {exc}") from exc
+        raise AlignmentError("could not load audio") from exc
     if waveform.shape[0] > 1:
         waveform = waveform.mean(dim=0, keepdim=True)
     if sample_rate != _WAV2VEC2_BUNDLE.sample_rate:
@@ -164,7 +180,11 @@ def align_words(path: Path, text: str) -> list[Word]:
     try:
         aligned_tokens, alignment_scores = F.forced_align(emission, targets, blank=0)
     except Exception as exc:
-        raise AlignmentError(f"forced alignment failed: {exc}") from exc
+        # Deliberately not interpolating exc's message: torchaudio's own exception text can embed
+        # the full target token tensor, which maps 1:1 back to the lyric text via the label list --
+        # that would leak transcript content through this exception even though the message looks
+        # content-free at a glance. See this class's docstring (CLAUDE.md: never log raw lyrics).
+        raise AlignmentError("forced alignment failed") from exc
     aligned_tokens, alignment_scores = aligned_tokens[0], alignment_scores[0].exp()
 
     token_spans = F.merge_tokens(aligned_tokens, alignment_scores)
@@ -177,7 +197,7 @@ def align_words(path: Path, text: str) -> list[Word]:
     ratio = waveform.shape[1] / num_frames
 
     words: list[Word] = []
-    for idx, (word_text, spans) in enumerate(zip(words_text, word_spans, strict=True)):
+    for idx, (word_text, spans) in enumerate(zip(alignable_words, word_spans, strict=True)):
         start_sample = ratio * spans[0].start
         end_sample = ratio * spans[-1].end
         start_ms = int(start_sample / _WAV2VEC2_BUNDLE.sample_rate * 1000)

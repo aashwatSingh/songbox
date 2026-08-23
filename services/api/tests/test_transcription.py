@@ -66,3 +66,47 @@ def test_align_words_produces_word_level_timings_in_order(synthetic_wav: Path) -
 def test_align_words_rejects_empty_text(synthetic_wav: Path) -> None:
     with pytest.raises(AlignmentError):
         align_words(synthetic_wav, "")
+
+
+def test_align_words_handles_a_hyphenated_word(synthetic_wav: Path) -> None:
+    # Regression test: the dictionary previously included the CTC blank ('-', index 0) alongside
+    # every real label, so a literal hyphen in a word (e.g. "well-known") tokenized to include
+    # index 0 and torchaudio.functional.forced_align(..., blank=0) rejected the whole target
+    # tensor with "targets Tensor shouldn't contain blank index" -- crashing the entire request
+    # for any track whose transcript contained a hyphenated word. This must now align cleanly.
+    words = align_words(synthetic_wav, "a well-known song")
+
+    assert [w.text for w in words] == ["a", "well-known", "song"]
+    assert [w.idx for w in words] == [0, 1, 2]
+    for word in words:
+        assert word.start_ms >= 0
+        assert word.end_ms >= word.start_ms
+        assert 0.0 <= word.confidence <= 1.0
+
+
+def test_align_words_drops_unalignable_words_instead_of_raising(synthetic_wav: Path) -> None:
+    # Regression test: a word that reduces to zero alignable characters after tokenization (a
+    # bare numeral like "1979", or the "♪" symbol Whisper sometimes emits for music passages)
+    # previously raised AlignmentError and lost every other word's alignment along with it. The
+    # alignable words in the same call must still come back with real timings, and the
+    # unalignable ones must be cleanly excluded rather than crashing the whole call.
+    words = align_words(synthetic_wav, "back in 1979")
+
+    assert [w.text for w in words] == ["back", "in"]
+    assert [w.idx for w in words] == [0, 1]
+    for word in words:
+        assert word.start_ms >= 0
+        assert word.end_ms >= word.start_ms
+        assert 0.0 <= word.confidence <= 1.0
+
+
+def test_align_words_drops_a_music_note_symbol(synthetic_wav: Path) -> None:
+    words = align_words(synthetic_wav, "la la ♪ la")
+
+    assert [w.text for w in words] == ["la", "la", "la"]
+    assert [w.idx for w in words] == [0, 1, 2]
+
+
+def test_align_words_raises_when_no_word_is_alignable(synthetic_wav: Path) -> None:
+    with pytest.raises(AlignmentError):
+        align_words(synthetic_wav, "1979 ♪ 42")
