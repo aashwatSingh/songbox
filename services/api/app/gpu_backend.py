@@ -21,7 +21,10 @@ class BackendBusyError(Exception):
 class BackendTimeoutError(Exception):
     """Raised when fn() did not complete within the timeout. The underlying thread is left
     running to finish (or fail) on its own -- CPU-bound torch/ctranslate2 inference cannot be
-    cancelled from Python once started. Its eventual result is discarded."""
+    cancelled from Python once started. Its eventual result is discarded. run_inference()'s
+    `finally` releases the inference lock before that abandoned thread actually finishes, so a
+    new job can start running concurrently with it -- inherited unchanged from M3's original
+    design, not a new bug, just documented here now that the lock lives in this module."""
 
 
 @dataclass
@@ -31,7 +34,7 @@ class _ThreadOutcome[T]:
     completed: bool = False
 
 
-def run_inference[T](fn: Callable[[], T], *, timeout_seconds: int) -> T:
+def run_inference[T](fn: Callable[[], T], *, timeout_seconds: float) -> T:
     """Run fn() on the `local` GPU backend, serialized against every other inference call in this
     process. Raises BackendBusyError if the lock itself can't be acquired within timeout_seconds,
     BackendTimeoutError if fn() doesn't finish within timeout_seconds, or re-raises whatever fn()
@@ -48,7 +51,7 @@ def run_inference[T](fn: Callable[[], T], *, timeout_seconds: int) -> T:
         _inference_lock.release()
 
 
-def _run_with_timeout[T](fn: Callable[[], T], timeout_seconds: int) -> T:
+def _run_with_timeout[T](fn: Callable[[], T], timeout_seconds: float) -> T:
     outcome: _ThreadOutcome[T] = _ThreadOutcome()
 
     def _target() -> None:

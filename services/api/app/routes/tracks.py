@@ -46,9 +46,9 @@ SEPARATION_TIMEOUT_SECONDS = 1800
 ALLOWED_WHISPER_MODEL_SIZES = ("tiny", "base", "small", "medium", "large-v3")
 
 # Whisper + wav2vec2 forced alignment is slower per second of audio than Demucs separation was
-# (see docs/BENCHMARKS.md's M4 section once measured) but shares the same "one heavy model at a
-# time on this box" reasoning as SEPARATION_TIMEOUT_SECONDS above. Using the same 1800s bound
-# until real numbers say otherwise.
+# (see docs/BENCHMARKS.md's M4 section) but shares the same "one heavy model at a time on this
+# box" reasoning as SEPARATION_TIMEOUT_SECONDS above. Using the same 1800s bound until real
+# numbers say otherwise.
 TRANSCRIPTION_TIMEOUT_SECONDS = 1800
 
 
@@ -426,8 +426,16 @@ def transcribe_track(
             detail=f"track has not passed the rights gate (status={track.status})",
         )
 
+    # .limit(1) rather than a bare scalar_one_or_none(): /separate has no idempotency guard (a
+    # known, deliberately-deferred M3 limitation -- no unique constraint stops it from being
+    # called twice on the same track, which would write two full sets of 4 Stem rows), so more
+    # than one "vocals" row can legitimately exist here. scalar_one_or_none() raises
+    # MultipleResultsFound (an unhandled 500) in that case; Stem has no created_at column (also
+    # out of scope to add here) to pick "the most recent" set by, so which of the resulting stem
+    # sets gets used below is arbitrary -- a real fix belongs with /separate's idempotency gap,
+    # not here. Same pattern as get_transcription's order_by(...).limit(1) further down.
     vocals_stem = db.execute(
-        select(Stem).where(Stem.track_id == track.id, Stem.stem_type == "vocals")
+        select(Stem).where(Stem.track_id == track.id, Stem.stem_type == "vocals").limit(1)
     ).scalar_one_or_none()
     if vocals_stem is None:
         raise HTTPException(
@@ -467,7 +475,13 @@ def transcribe_track(
         Path(tmp.name).unlink(missing_ok=True)
 
     declaration = db.get(RightsDeclaration, track.rights_declaration_id)
-    assert declaration is not None
+    if declaration is None:
+        # Internal-consistency check, not a client-facing failure: a track that passed the rights
+        # gate always has a rights_declaration_id pointing at a real row (upload_track() creates
+        # both in the same transaction). An assert here would be stripped under python -O and,
+        # if this were ever false, `declaration.lane` below would instead raise an unhandled
+        # AttributeError with no useful message.
+        raise RuntimeError(f"track {track.id} has no rights declaration -- data integrity error")
     license_covers_lyrics: bool | None = None
     if declaration.license_id is not None:
         license_row = db.get(License, declaration.license_id)
