@@ -9,7 +9,9 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 
 from app.acoustid.client import FixtureAcoustIDClient
+from app.acoustid.fixtures import KNOWN_MATCH_RESULT
 from app.db import db_session_for_tenant
+from app.fingerprint import fingerprint_audio
 from app.main import app
 from app.models import Transcription
 from app.routes.tracks import get_acoustid_client
@@ -148,3 +150,57 @@ def test_realign_rejects_non_english_tracks(
     )
 
     assert response.status_code == 409
+
+
+def test_realign_rejects_track_that_has_not_passed_the_gate(
+    monkeypatch: pytest.MonkeyPatch, synthetic_wav: Path
+) -> None:
+    # The single most safety-relevant gate in this codebase per CLAUDE.md ("Nothing reaches a
+    # GPU without a rights-gate PASS") -- mirrors test_tracks_transcribe.py's
+    # test_transcribe_rejects_track_that_has_not_passed_the_gate and test_tracks_separate.py's
+    # test_separate_rejects_track_that_has_not_passed_the_gate setup exactly: a Lane A upload
+    # where the fixture AcoustID client returns a KNOWN match, forcing a pending_review hold.
+    def _fail_if_called(*args: object, **kwargs: object) -> list[object]:
+        raise AssertionError("align_words must not be called for a track that hasn't passed")
+
+    monkeypatch.setattr("app.routes.tracks.align_words", _fail_if_called)
+
+    known_fp = fingerprint_audio(synthetic_wav)
+    app.dependency_overrides[get_acoustid_client] = lambda: FixtureAcoustIDClient(
+        {known_fp.value: KNOWN_MATCH_RESULT}
+    )
+    try:
+        with synthetic_wav.open("rb") as fh:
+            upload_response = client.post(
+                "/tracks/upload",
+                headers=HEADERS,
+                data={"lane": "A", "attestation_text": "I made this recording"},
+                files={"file": ("tone.wav", fh, "audio/wav")},
+            )
+    finally:
+        app.dependency_overrides.pop(get_acoustid_client, None)
+    assert upload_response.json()["status"] == "pending_review"
+    track_id = upload_response.json()["track_id"]
+
+    response = client.post(
+        f"/tracks/{track_id}/realign", headers=HEADERS, json={"text": "hello world"}
+    )
+
+    assert response.status_code == 409
+
+
+def test_realign_rejects_whitespace_only_text(
+    monkeypatch: pytest.MonkeyPatch, synthetic_wav: Path
+) -> None:
+    def _fail_if_called(*args: object, **kwargs: object) -> list[object]:
+        raise AssertionError("align_words must not be called for whitespace-only text")
+
+    monkeypatch.setattr("app.routes.tracks.align_words", _fail_if_called)
+    track_id = _upload_pass_and_separate_track(synthetic_wav)
+    _insert_transcription(track_id)
+
+    response = client.post(
+        f"/tracks/{track_id}/realign", headers=HEADERS, json={"text": "   "}
+    )
+
+    assert response.status_code == 422

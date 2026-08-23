@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import cast
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -576,7 +576,13 @@ def get_transcription(
 
 
 class RealignRequest(BaseModel):
-    text: str
+    # Every other client-controlled input in this file is bounded (model_size/model_name by a
+    # whitelist, uploads by MAX_UPLOAD_BYTES) -- this text was the one unbounded exception.
+    # 5000 chars is a generous cap for song lyrics; align_words() would reject an empty/
+    # whitespace string anyway (AlignmentError("cannot align empty text")), but that check runs
+    # only after a MinIO fetch, temp file, lock acquisition, and model load, so it's re-checked
+    # explicitly and early in realign_track() below.
+    text: str = Field(min_length=1, max_length=5000)
 
 
 @router.post("/tracks/{track_id}/realign", response_model=TranscribeResponse)
@@ -605,6 +611,10 @@ def realign_track(
         raise HTTPException(
             status_code=409, detail="no transcription found -- run /transcribe first"
         )
+    # Deliberate, not a bug: this gate reads `latest.lyrics_display_allowed`, the PRIOR
+    # transcription row's STORED value, while the value written to the NEW row further down is
+    # freshly recomputed via resolve_lyrics_display_allowed() -- see that call site below for why
+    # this asymmetry is safe by design rather than an oversight.
     if not latest.lyrics_display_allowed:
         raise HTTPException(
             status_code=409, detail="lyric correction is not available for this track"
@@ -622,6 +632,13 @@ def realign_track(
         raise HTTPException(
             status_code=409, detail="track has no vocals stem -- run /separate first"
         )
+
+    # Whitespace-only text passes Field(min_length=1) (a single space has length 1) but
+    # align_words() would reject it anyway with AlignmentError("cannot align empty text") --
+    # only after a MinIO fetch, temp file write, lock acquisition, and model load. Reject it here
+    # instead, before any of that cost is spent.
+    if not body.text.strip():
+        raise HTTPException(status_code=422, detail="text must not be empty")
 
     minio_client = get_minio_client()
     vocal_bytes = fetch_track_file(minio_client, vocals_stem.storage_key)
