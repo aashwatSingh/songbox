@@ -39,11 +39,14 @@ What was built:
 "*Done when:* measured word-onset error is within ±50ms median." The real, measured number for the
 primary production path — wav2vec2 forced alignment against known-correct reference lyrics,
 English, `python scripts/eval_alignment.py base` run to completion against all 40 non-ND-licensed
-JamendoLyrics tracks — is a **68.2ms median error, 37.2% of words within 50ms** (n=2188 words; full
-output and the whisper-native secondary numbers in `docs/BENCHMARKS.md`'s M4 section). This is
-above the ±50ms target, not within it. Recording this plainly, not glossing over it: whether to
-revisit the model/approach, adjust the target, or something else is a decision for the final
-whole-branch review, not resolved here.
+JamendoLyrics tracks (en=7, es=17, fr=12, de=4 by language; the aligned-English measurement below
+draws only from the 7 English tracks) — is a **68.2ms median error, 37.2% of words within 50ms**
+(2,188 words across those 7 English tracks; full output and the whisper-native secondary numbers in
+`docs/BENCHMARKS.md`'s M4 section). This is above the ±50ms target, not within it. Recording this
+plainly, not glossing over it: the decision on whether to revisit the model/approach, adjust the
+target, or something else has been made — see the "In flight" note below and
+`docs/PLAN.md`'s M4a entry (commit `d3ff5ff`): merge M4a as engineering-complete with this gap
+documented, tracked as `docs/PLAN.md` open question 5, not a merge blocker.
 
 Two real spec corrections were made during this milestone, both worth recording precisely since
 the second one was a mistake caught before it shipped, not a clean up-front decision:
@@ -62,10 +65,14 @@ the second one was a mistake caught before it shipped, not a clean up-front deci
   specifically forbids creating derivative works, which running Demucs separation and forced
   alignment on the audio is. This is not the product's Lane C path and no track from this dataset
   may ever be uploaded through `/tracks/upload` or stored via the product's own pipeline. The eval
-  script was written to a hard constraint instead: ephemeral processing only (every derived
-  artifact deleted immediately after each track is scored, in a `finally` block), any
-  `license_type` containing `"ND"` skipped entirely before any audio is touched, and only the
-  aggregate numbers in `docs/BENCHMARKS.md` ever committed.
+  script was written to a hard constraint instead: `load_dataset()` downloads the full dataset
+  snapshot into the local Hugging Face cache -- including the ND-licensed tracks' audio, since the
+  license check can't happen before that download -- but no ND-licensed track's audio is ever
+  *processed*: any `license_type` containing `"ND"` is skipped before separation, transcription, or
+  alignment ever run on it, so no derivative work (which is what ND actually forbids) is created
+  from it. Only a per-track *working copy* -- the file copied out to a `songbox-eval-*` temp
+  directory for processing -- is ephemeral and deleted immediately after that track is scored, in a
+  `finally` block; only the aggregate numbers in `docs/BENCHMARKS.md` are ever committed.
 
 A real bug was found and fixed mid-Task-4: `transcribe_audio()` originally raised
 `TranscriptionError("transcription produced no words")` whenever Whisper's `base` model detected
@@ -438,8 +445,9 @@ findings, all fixed:
 - Nothing mid-work right now. M0, M1, M2, M3, and M4a are all done. M4b (lyric correction editor
   UI + re-alignment) has not been started. M4a's measured aligned-English accuracy (68.2ms median,
   37.2% within 50ms) does not meet `docs/PLAN.md`'s ±50ms acceptance criterion — see M4a's entry
-  above — and that gap has not yet been resolved; it awaits a human decision at the final
-  whole-branch review.
+  above. That decision has been made, not left pending: merge M4a as engineering-complete with the
+  gap documented, tracked as real follow-up work (`docs/PLAN.md` open question 5, commit
+  `d3ff5ff`), not a merge blocker.
 
 ## Blocked
 

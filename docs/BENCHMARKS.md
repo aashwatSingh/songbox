@@ -64,12 +64,16 @@ benchmark was measured under time pressure instead.
 
 **Rights note (binding, not optional):** most JamendoLyrics tracks are CC BY-NC-ND / CC BY-NC-SA,
 not rights-clean for this product's own Lane C — see `docs/superpowers/specs/2026-08-21-alignment-
-engine-design.md`'s licensing correction. `scripts/eval_alignment.py` downloads each track's audio
-to an ephemeral temp directory, runs the pipeline for scoring only, and deletes every derived
-artifact (source audio, separated stems, alignment output) immediately after that track is scored,
-inside a `finally` block. Any row whose `license_type` contains `"ND"` is skipped entirely before
-any audio is even touched. Only the aggregate numbers below were ever committed — no audio, no
-per-track derived file, from this dataset or otherwise.
+engine-design.md`'s licensing correction. `scripts/eval_alignment.py` calls `load_dataset(...)`
+first, which downloads the **full dataset snapshot** into the local Hugging Face cache — all 79
+tracks, including all 39 ND-licensed ones (confirmed: ~393MB sits in the HF cache after a run).
+The ND check happens before any *processing* of a track's audio, not before it's downloaded: any
+row whose `license_type` contains `"ND"` is skipped before separation, transcription, or alignment
+ever run on it, so no derivative work is ever created from ND-licensed audio, which is what ND
+actually forbids. Only a per-track *working copy* — the file copied out to a `songbox-eval-*` temp
+directory for processing — is ephemeral, deleted immediately after that track is scored, inside a
+`finally` block. Only the aggregate numbers below were ever committed — no per-track derived file,
+from this dataset or otherwise.
 
 Exact literal printed output:
 

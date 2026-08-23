@@ -81,8 +81,9 @@ Each ends with working, tested, committed code and an updated `STATUS.md`.
     deliberate, documented deviation from the original "hand-labeled 10-track set" plan, made for
     independence/comparability, not convenience (see the design spec's licensing correction).
     *Done when:* measured word-onset error is within ±50ms median. **Measured, not met**: the real
-    result is 68.2ms median / 37.2% of words within 50ms (English, wav2vec2-aligned, 2,188 words
-    across 40 real tracks — see `docs/BENCHMARKS.md`'s M4 section). Human decision: merge M4a as
+    result is 68.2ms median / 37.2% of words within 50ms (2,188 words across the 7 non-ND English
+    tracks; 40 tracks total were scored across all four languages: en=7, es=17, fr=12, de=4 — see
+    `docs/BENCHMARKS.md`'s M4 section). Human decision: merge M4a as
     engineering-complete with this gap documented, not silently closed; closing it is real,
     open-ended follow-up work (candidates: a larger wav2vec2 variant, checking whether the
     separated vocal stem's audio quality degrades alignment precision vs. the original mix, or a
