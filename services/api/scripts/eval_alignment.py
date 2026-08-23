@@ -130,12 +130,18 @@ def main(whisper_model_size: str = "base") -> None:
             else:
                 shutil.copyfile(audio_field["path"], source_path)
 
-            stem_paths = run_inference(
-                lambda source_path=source_path: separate_audio(source_path),
-                timeout_seconds=INFERENCE_TIMEOUT_SECONDS,
-            )
-            vocals_path = stem_paths["vocals"]
+            # separate_audio() is called INSIDE this try/finally (not before it) so that its own
+            # mkdtemp()'d stem directory is covered by the cleanup below even if separation raises
+            # partway through -- previously the call sat outside the protected region, so a
+            # partial failure there could leak that temp directory.
+            stem_paths: dict[str, Path] | None = None
             try:
+                stem_paths = run_inference(
+                    lambda source_path=source_path: separate_audio(source_path),
+                    timeout_seconds=INFERENCE_TIMEOUT_SECONDS,
+                )
+                vocals_path = stem_paths["vocals"]
+
                 if language == ENGLISH_LANGUAGE_CODE:
                     aligned_errors = _score_aligned(vocals_path, reference_words)
                     aligned_errors_by_lang.setdefault(language, []).extend(aligned_errors)
@@ -147,7 +153,8 @@ def main(whisper_model_size: str = "base") -> None:
                 native_match_rates.append(match_rate)
                 scored += 1
             finally:
-                shutil.rmtree(vocals_path.parent, ignore_errors=True)
+                if stem_paths is not None:
+                    shutil.rmtree(next(iter(stem_paths.values())).parent, ignore_errors=True)
 
     print(f"Scored {scored} tracks, skipped {skipped_nd} ND-licensed tracks.\n")
 
