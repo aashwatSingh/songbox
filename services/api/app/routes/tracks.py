@@ -90,6 +90,43 @@ class UploadResponse(BaseModel):
     reason: str
 
 
+class TrackSummary(BaseModel):
+    track_id: uuid.UUID
+    status: str
+    duration_seconds: float | None
+    has_transcription: bool
+
+
+@router.get("/tracks", response_model=list[TrackSummary])
+def list_tracks(
+    identity: Identity = Depends(get_identity),
+    db: Session = Depends(get_db),
+) -> list[TrackSummary]:
+    tracks = db.execute(
+        select(Track).where(Track.tenant_id == identity.tenant_id)
+    ).scalars().all()
+
+    transcribed_track_ids = set(
+        db.execute(
+            select(Transcription.track_id)
+            .where(Transcription.tenant_id == identity.tenant_id)
+            .distinct()
+        ).scalars().all()
+    )
+
+    return [
+        TrackSummary(
+            track_id=track.id,
+            status=track.status,
+            duration_seconds=(
+                float(track.duration_seconds) if track.duration_seconds is not None else None
+            ),
+            has_transcription=track.id in transcribed_track_ids,
+        )
+        for track in tracks
+    ]
+
+
 @router.post("/tracks/upload", response_model=UploadResponse)
 def upload_track(
     request: Request,
