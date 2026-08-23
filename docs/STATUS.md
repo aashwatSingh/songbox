@@ -2,7 +2,7 @@
 
 Last updated: 2026-08-22.
 
-## Done — M4a complete
+## Done — M4a engineering complete, accuracy target not met
 
 M4a's scope per `docs/superpowers/specs/2026-08-21-alignment-engine-design.md` (the alignment
 engine — Whisper + wav2vec2 forced alignment — and the eval harness that proves its accuracy
