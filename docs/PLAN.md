@@ -90,9 +90,15 @@ Each ends with working, tested, committed code and an updated `STATUS.md`.
     systematic bias in the frame-to-millisecond conversion), tracked as open question 5 below —
     not a blocker for M4b or M5, but real work that should land before the player's word-highlight
     UX (M6) depends on tight timing.
-  - **M4b — Lyric correction editor (not started).** The lyric correction editor UI and
-    re-alignment on corrected text — this repo's first real frontend work (`apps/web` is still the
-    unmodified Next.js starter as of M4a). Needs its own brainstorm/spec/plan cycle.
+  - **M4b — Lyric correction editor (done, see `docs/STATUS.md`).** The lyric correction editor
+    UI and re-alignment on corrected text — this repo's first real frontend work (`apps/web` was
+    still the unmodified Next.js starter as of M4a). `GET /tracks`, dev-only CORS, the gated
+    `POST /tracks/{id}/realign` endpoint, an API client with dev-only client-side identity
+    (explicitly not real auth — see open question 9), and a `/tracks` list page plus a
+    `/tracks/[id]` correction editor with its three states (editable, locked for
+    lyrics-not-allowed, locked for non-English). Verified with a real live browser session
+    (upload→approve→separate→correct→re-align, both locked states, no console errors) as well as
+    automated tests, per the working agreement's UI/glue-code exemption from test-first.
 - **M5 — Pitch + structure (1 session).** CREPE contour, beat grid, sections, `karaoke.json` v1 emitted
   and schema-validated.
 - **M6 — Player (3+ sessions — see risk note).** Web Audio playback, word highlight, pitch lane, live
@@ -135,6 +141,20 @@ milestone reaches them):
    a systematic bias in the frame-to-millisecond conversion. Real data only, per usual — no guessing
    which fix will work before trying it. Not a blocker for M4b/M5; should land before M6's word-
    highlight UX depends on tight timing.
+
+9. **New in M4b.** No milestone anywhere in this plan scopes real authentication. Every endpoint
+   across M1-M4a and M4b's new ones (`GET /tracks`, `POST /tracks/{id}/realign`) still
+   authenticates via the dev-only `X-Dev-Tenant-Id`/`X-Dev-User-Id` header stub introduced in M1
+   (see `docs/STATUS.md`'s M1 "Deliberately deferred" section) -- there is still no real identity
+   provider, session, or credential check anywhere in this codebase. M4b made this stub reachable
+   from a browser for the first time: `apps/web/lib/api.ts`'s dev-only client-side identity
+   generates a random tenant/user UUID pair on first load, stores it in `localStorage`, and sends
+   it as those same two headers on every request -- previously only curl and pytest ever exercised
+   this path. This is explicitly NOT real auth (documented as such at that call site) and changes
+   nothing about the underlying gap: anyone who can reach the API can set those headers to any
+   tenant ID they choose. When does a real milestone replace the stub, and what's the actual auth
+   model (identity provider, tenant provisioning, migration path for existing dev-stub data)?
+   Genuinely open -- not silently assumed solved.
 
 Resolved during this planning pass (see `docs/DECISIONS_LOG.md` for full reasoning):
 

@@ -1,6 +1,99 @@
 # Status
 
-Last updated: 2026-08-22.
+Last updated: 2026-08-23.
+
+## Done — M4b complete
+
+M4b's scope per `docs/superpowers/specs/2026-08-23-lyric-correction-editor-design.md` (the lyric
+correction editor UI and re-alignment on corrected text) is built and verified end to end, across
+four tasks:
+
+What was built:
+- **`GET /tracks`** (Task 1) — a new, per-tenant, unpaginated list endpoint
+  (`services/api/app/routes/tracks.py`) returning `{track_id, status, duration_seconds,
+  has_transcription}` for every track belonging to the calling tenant. `has_transcription` is
+  computed with one extra query collecting distinct `track_id`s from `transcriptions` for this
+  tenant, not an N+1 lookup per track. Alongside it, dev-only permissive CORS middleware
+  (`services/api/app/main.py`) so the Next.js dev server (port 3000) can call this API (port 8000)
+  cross-origin — localhost origins only, explicitly documented as dev-only, not a hardened policy.
+- **`POST /tracks/{track_id}/realign`** (Task 2) — gated, all checks before any model call,
+  mirroring `transcribe_track`'s and `separate_track`'s proven pattern: track exists and belongs
+  to this tenant (404), `track.status == "passed"` (409 — the rights gate, same as every mutating
+  track endpoint), a `Transcription` row exists (409 — nothing to correct until `/transcribe` has
+  run once), that row's `lyrics_display_allowed` is `true` (409), that row's `language == "en"`
+  (409 — forced alignment is English-only), and a `vocals` stem exists (409). On pass, the
+  corrected text is forced-aligned via the existing `align_words()` and written as a new,
+  immutable `Transcription` row (`whisper_model="user-corrected"`, `aligner="wav2vec2"`,
+  `language="en"`) — never a mutation of the prior row, matching this schema's established
+  append-only pattern for `RightsDeclaration` rows.
+- **Frontend API client** (Task 3) — `apps/web/lib/api.ts`, the first real code in `apps/web`.
+  Centralizes the base URL, response parsing, and dev-only client-side identity: a random
+  `tenant_id`/`user_id` pair generated on first load and persisted in `localStorage`, sent as the
+  same `X-Dev-Tenant-Id`/`X-Dev-User-Id` headers every other client of this API (curl, pytest) has
+  always used. Explicitly documented at that call site as **not real authentication** — see
+  `docs/PLAN.md`'s open question 9 below, added by this same review pass since the design spec's
+  Decision 1 required the gap to be recorded there, not silently assumed solved. A `/tracks` list
+  page (`apps/web/app/tracks/page.tsx`) renders every track's status, linking into the editor only
+  for tracks with `has_transcription === true`.
+- **`/tracks/[id]` editor page** (Task 4) — `apps/web/app/tracks/[id]/page.tsx`. Three states:
+  editable text-only correction (one input per word, joined with spaces and posted to
+  `/realign` on save, per Decision 3 — no manual timing-boundary dragging), a locked banner when
+  `lyrics_display_allowed` is `false` (Decision 6), and a locked banner when the track's language
+  isn't English (Decision 5), both showing the existing words/timings read-only rather than an
+  edit form.
+
+90 tests pass (up from M4a's 81); `ruff check .` and `mypy app` (strict) both clean in
+`services/api`. `npm run build` and `npm run lint` both clean in `apps/web`.
+
+Verified with a real live browser session against real running servers — not just automated
+tests, since UI and glue code are exempt from test-first per the working agreement: a full
+upload→approve→separate→correct→re-align round trip was run end to end, including both
+locked-banner states (lyrics-not-allowed and non-English), with no console errors.
+
+A final whole-branch review found 9 real issues, all fixed in one pass:
+- **Important — `docs/PLAN.md` never recorded the real-auth open question the design spec's
+  Decision 1 explicitly required** ("real auth stays a genuine, tracked gap ... not silently
+  assumed solved"). Added as open question 9: no milestone anywhere in the plan scopes real auth,
+  every endpoint still uses the M1 dev-only header stub, and M4b made that stub reachable from a
+  browser for the first time without changing that fact.
+- **Important — `docs/STATUS.md` and `docs/PLAN.md` still described M4b as not started** even
+  though it had been built. Both updated — this entry, and `docs/PLAN.md`'s M4b milestone line.
+- **Important — `POST /tracks/{id}/realign` was missing a test for `track.status != "passed"`**,
+  the single most safety-relevant gate in this codebase per `CLAUDE.md` ("Nothing reaches a GPU
+  without a rights-gate PASS"), even though the design spec's testing strategy named all four gate
+  rejections. Added `test_realign_rejects_track_that_has_not_passed_the_gate` in
+  `services/api/tests/test_tracks_realign.py`, mirroring the existing non-invocation pattern in
+  that file and the analogous tests in `test_tracks_transcribe.py`/`test_tracks_separate.py`.
+- **Important — no test covered the CORS middleware**, even though the design spec's testing
+  strategy named it explicitly. Added `services/api/tests/test_cors.py`: a lightweight preflight
+  check confirming `http://localhost:3000` gets the expected `Access-Control-Allow-Origin` header.
+- **Important — `RealignRequest.text` was the only unbounded, unvalidated client-controlled input
+  in `tracks.py`**, unlike every other input in the file (`model_size`/`model_name` whitelists,
+  the upload size cap). Added `Field(min_length=1, max_length=5000)`, plus an early rejection for
+  whitespace-only text before the MinIO fetch/temp-file/lock/model-load cost that `align_words()`
+  would otherwise pay before rejecting the same input, with a test proving `align_words` is never
+  invoked for that case.
+- **Minor — `apps/web/app/page.tsx` was still the untouched `create-next-app` template with no
+  link to `/tracks`.** Added a `next/link` to the feature.
+- **Minor — the "Save & re-align" button on a zero-word English transcription was enabled and
+  could only ever fail** (posting empty text gets a 422). Disabled when `wordTexts.length === 0`,
+  with explanatory copy.
+- **Minor — the lyrics-gate stored-vs-recomputed asymmetry in `realign_track`** (the gate reads
+  the prior transcription row's stored `lyrics_display_allowed`, while the new row's value is
+  freshly recomputed) had no comment explaining it was deliberate. Added one at the gate check.
+- **Minor — the editor page had no way back to `/tracks` except the browser's back button.**
+  Added a "&larr; Back to tracks" link near the top of each of its three content-rendering states.
+
+Deliberately out of scope, matching the design spec's own scope decisions:
+- **Manual timing adjustment.** A real, larger future feature (waveform rendering, drag
+  interaction, a timing-conflict model) — Decision 3.
+- **Real authentication.** A genuine, tracked gap, not solved here — Decision 1, now recorded as
+  `docs/PLAN.md` open question 9.
+- **Upload, separation-trigger, or transcription-trigger UI.** The editor only acts on tracks that
+  already have a transcription; producing one stays an API-only operation for now.
+- **`karaoke.json` packaging** (M5) and **closing the ±50ms accuracy gap**
+  (`docs/PLAN.md` open question 5) — both real, separate pieces of work this milestone does not
+  attempt.
 
 ## Done — M4a engineering complete, accuracy target not met
 
@@ -442,12 +535,13 @@ findings, all fixed:
 
 ## In flight
 
-- Nothing mid-work right now. M0, M1, M2, M3, and M4a are all done. M4b (lyric correction editor
-  UI + re-alignment) has not been started. M4a's measured aligned-English accuracy (68.2ms median,
-  37.2% within 50ms) does not meet `docs/PLAN.md`'s ±50ms acceptance criterion — see M4a's entry
-  above. That decision has been made, not left pending: merge M4a as engineering-complete with the
-  gap documented, tracked as real follow-up work (`docs/PLAN.md` open question 5, commit
-  `d3ff5ff`), not a merge blocker.
+- Nothing mid-work right now. M0, M1, M2, M3, M4a, and M4b are all done. M4a's measured
+  aligned-English accuracy (68.2ms median, 37.2% within 50ms) does not meet `docs/PLAN.md`'s
+  ±50ms acceptance criterion — see M4a's entry below. That decision has been made, not left
+  pending: merge M4a as engineering-complete with the gap documented, tracked as real follow-up
+  work (`docs/PLAN.md` open question 5, commit `d3ff5ff`), not a merge blocker. Real
+  authentication remains a genuine, tracked gap across the whole project — `docs/PLAN.md` open
+  question 9.
 
 ## Blocked
 
@@ -460,7 +554,7 @@ findings, all fixed:
    check whether the separated vocal stem's audio quality degrades alignment precision versus the
    original mix, or investigate a systematic bias in the frame-to-millisecond conversion. Real work,
    not a merge blocker — should land before M6's word-highlight UX depends on tight timing.
-2. Start M4b (lyric correction editor UI + re-alignment on corrected text, per
-   `docs/superpowers/specs/2026-08-21-alignment-engine-design.md`'s M4/M4b split) — this repo's
-   first real frontend surface; `apps/web` is still the unmodified Next.js starter.
-3. Push to a GitHub remote (once one exists) to get CI actually running.
+2. Start M5 (pitch + structure — CREPE contour, beat grid, sections, `karaoke.json` v1).
+3. Push to a GitHub remote (once one exists) to get CI actually running. Also revisit
+   `docs/PLAN.md` open question 9 (real authentication) whenever a milestone's scope can actually
+   absorb it.
