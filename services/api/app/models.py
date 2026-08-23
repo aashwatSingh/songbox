@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Numeric, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -107,4 +107,29 @@ class Transcription(Base):
     lyrics_display_allowed: Mapped[bool] = mapped_column(Boolean, nullable=False)
     # words: [{"idx": int, "text": str, "start_ms": int, "end_ms": int, "confidence": float}, ...]
     words: Mapped[list[dict[str, object]]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class KaraokePackage(Base):
+    __tablename__ = "karaoke_packages"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    track_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tracks.id"), nullable=False
+    )
+    # schema_version: karaoke.json's own version -- 1 for every row this milestone produces.
+    # CLAUDE.md: any shape change needs a migration path, not a silent bump.
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    # words: [{"idx": int, "text": str | None, "start_ms": int, "end_ms": int, "confidence": float}]
+    # -- copied from the track's latest Transcription row at packaging time, text nulled when
+    # lyrics_display_allowed is False (checked at write time, not just read time).
+    words: Mapped[list[dict[str, object]]] = mapped_column(JSONB, nullable=False)
+    # pitch_model: which torchcrepe variant produced this row, e.g. "tiny"
+    pitch_model: Mapped[str] = mapped_column(String(20), nullable=False)
+    # pitch: [{"time_ms": int, "hz": float | None, "confidence": float}, ...]
+    pitch: Mapped[list[dict[str, object]]] = mapped_column(JSONB, nullable=False)
+    tempo_bpm: Mapped[float] = mapped_column(Float, nullable=False)
+    beats_ms: Mapped[list[int]] = mapped_column(JSONB, nullable=False)
+    sections_ms: Mapped[list[int]] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
