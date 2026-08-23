@@ -44,3 +44,71 @@ listening test with real songs and human judgment, out of scope for M3 (see
 Note: this is measured against the `local` CPU backend (this dev machine), not the eventual
 Modal/RunPod production backend — per `docs/adr/0001-gpu-backend-abstraction.md`, production
 cost/speed figures are `TODO: unmeasured` until that backend exists in M7.
+
+## M4: Alignment engine (Whisper + wav2vec2)
+
+Measured on: 2026-08-22, on this dev machine (CPU-only — same `torch 2.13.0+cpu` build as M3's
+table above), via the real command:
+
+```
+cd services/api
+python scripts/eval_alignment.py base
+```
+
+against **JamendoLyrics Multi-Lang** (`jamendolyrics/jamendolyrics` on Hugging Face) — a
+Creative-Commons benchmark with manually annotated word-level timings covering English, German,
+French, and Spanish. Wall clock: approximately **2h49m** (process start 18:36:17, final output
+flush 21:25:43, from the redirected stdout/stderr log timestamps) — run to completion, no subset
+of the dataset and no early stop, per the design spec's warning about what happened when M3's
+benchmark was measured under time pressure instead.
+
+**Rights note (binding, not optional):** most JamendoLyrics tracks are CC BY-NC-ND / CC BY-NC-SA,
+not rights-clean for this product's own Lane C — see `docs/superpowers/specs/2026-08-21-alignment-
+engine-design.md`'s licensing correction. `scripts/eval_alignment.py` downloads each track's audio
+to an ephemeral temp directory, runs the pipeline for scoring only, and deletes every derived
+artifact (source audio, separated stems, alignment output) immediately after that track is scored,
+inside a `finally` block. Any row whose `license_type` contains `"ND"` is skipped entirely before
+any audio is even touched. Only the aggregate numbers below were ever committed — no audio, no
+per-track derived file, from this dataset or otherwise.
+
+Exact literal printed output:
+
+```
+Scored 40 tracks, skipped 39 ND-licensed tracks.
+
+=== Aligned (wav2vec2 forced alignment against reference lyrics, English only) ===
+  en: n=2188 words, median error=68.2ms, within 50ms=37.2%
+
+=== Whisper-native (whisper_model_size='base', matched against reference via difflib) ===
+  de: n=505 words, median error=124.4ms, within 50ms=18.2%
+  en: n=1268 words, median error=95.3ms, within 50ms=31.2%
+  es: n=1988 words, median error=137.2ms, within 50ms=18.8%
+  fr: n=1955 words, median error=135.6ms, within 50ms=16.2%
+  mean match rate across tracks: 50.8%
+```
+
+| Path | Language | n (words) | Median onset error | Within 50ms |
+|---|---|---|---|---|
+| Aligned (wav2vec2 forced alignment) | en | 2188 | 68.2ms | 37.2% |
+| Whisper-native | de | 505 | 124.4ms | 18.2% |
+| Whisper-native | en | 1268 | 95.3ms | 31.2% |
+| Whisper-native | es | 1988 | 137.2ms | 18.8% |
+| Whisper-native | fr | 1955 | 135.6ms | 16.2% |
+
+Whisper-native mean match rate across tracks (difflib reconciliation of predicted vs. reference
+words before scoring, so a low match rate can't hide inside an artificially good onset number):
+**50.8%**.
+
+**Against `docs/PLAN.md`'s M4 acceptance criterion** ("measured word-onset error is within ±50ms
+median"): the primary, production-relevant number — aligned English, 68.2ms median, 37.2% within
+50ms — does **not** meet that bar. This is the real, measured result against the real target; see
+`docs/STATUS.md`'s M4a entry for how this is being carried forward.
+
+Non-English languages were scored only through the whisper-native path (`align_words()` is not run
+for them — see the script's docstring), since forced alignment against a non-English reference
+requires a multilingual aligner, which is license-blocked for this commercial product per the
+design spec (`torchaudio.pipelines.MMS_FA` is CC-BY-NC 4.0, non-commercial only). No language
+produced zero scored words, so no cell above is `TODO: unmeasured`.
+
+This is measured against the `local` CPU backend, same caveat as M3's table: not representative of
+eventual Modal/RunPod production timing, which is `TODO: unmeasured` until M7.

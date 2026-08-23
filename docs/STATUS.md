@@ -1,6 +1,96 @@
 # Status
 
-Last updated: 2026-08-21.
+Last updated: 2026-08-22.
+
+## Done — M4a complete
+
+M4a's scope per `docs/superpowers/specs/2026-08-21-alignment-engine-design.md` (the alignment
+engine — Whisper + wav2vec2 forced alignment — and the eval harness that proves its accuracy
+against a real, independent benchmark) is built and measured end to end, across five tasks:
+
+What was built:
+- **`services/api/app/gpu_backend.py`** (Task 1) — the `local` backend's `run_inference()`
+  interface `docs/adr/0001-gpu-backend-abstraction.md` describes: one process-wide inference job
+  at a time, bounded by a caller-supplied wall-clock timeout. M3's `separate_audio()` call in
+  `services/api/app/routes/tracks.py` was retrofitted through it (a genuine no-behavior-change
+  refactor), and M4a's transcription/alignment calls use it from the start. This closes the
+  ADR-0001 deferral M3 documented — that ADR now has an "M4a update" section recording it.
+- **`transcriptions` table + lyric-rights resolution** (Task 2) — tenant-scoped like every other
+  table in this schema, with the Lane B `covers_recording`/`covers_lyrics` distinction on
+  `licenses` kept separate per `CLAUDE.md`: missing lyric clearance is a supported degraded state
+  (no lyric text rendered, timings still kept), not an error.
+- **`services/api/app/transcription.py`** (Task 3) — `transcribe_audio()` (faster-whisper) and
+  `align_words()` (wav2vec2 forced alignment via the non-deprecated `torchaudio.functional.
+  forced_align`/`merge_tokens`, `WAV2VEC2_ASR_BASE_960H`, MIT-licensed). Runs on the isolated vocal
+  stem M3 produces, never the full mix, per `CLAUDE.md`.
+- **`POST /tracks/{track_id}/transcribe` and `GET /tracks/{track_id}/transcription`** (Task 4) —
+  gated on the track's rights-gate status being `passed` AND a vocals stem existing, both checked
+  before any model load and both proven by non-invocation tests, following M3's exact proven
+  gating pattern.
+- **`services/api/scripts/eval_alignment.py`** (Task 5) — a real accuracy measurement against
+  JamendoLyrics Multi-Lang, a Creative-Commons benchmark with independently, manually annotated
+  word timings across English/German/French/Spanish — not a hand-labeled 10-track set built by
+  this same team, which `docs/PLAN.md`'s original wording called for (see "Spec corrections"
+  below).
+
+77 tests pass; `ruff check .` and `mypy app` (strict) both clean.
+
+**The measured result does not meet `docs/PLAN.md`'s own M4 acceptance criterion.** PLAN.md states:
+"*Done when:* measured word-onset error is within ±50ms median." The real, measured number for the
+primary production path — wav2vec2 forced alignment against known-correct reference lyrics,
+English, `python scripts/eval_alignment.py base` run to completion against all 40 non-ND-licensed
+JamendoLyrics tracks — is a **68.2ms median error, 37.2% of words within 50ms** (n=2188 words; full
+output and the whisper-native secondary numbers in `docs/BENCHMARKS.md`'s M4 section). This is
+above the ±50ms target, not within it. Recording this plainly, not glossing over it: whether to
+revisit the model/approach, adjust the target, or something else is a decision for the final
+whole-branch review, not resolved here.
+
+Two real spec corrections were made during this milestone, both worth recording precisely since
+the second one was a mistake caught before it shipped, not a clean up-front decision:
+- **The M4/M4b split.** `docs/PLAN.md`'s M4 as originally scoped bundles four separable things:
+  backend ML (Whisper + wav2vec2), an accuracy-measurement deliverable, this repo's first real
+  frontend surface (the lyric correction editor — `apps/web` is still the unmodified Next.js
+  starter), and a re-alignment loop. `docs/superpowers/specs/2026-08-21-alignment-engine-design.md`
+  split this into M4a (this milestone: the alignment engine + the eval harness that proves its
+  accuracy — the measurement stays welded to the thing it measures, since the ±50ms figure *is*
+  the acceptance criterion) and M4b (later: the lyric correction editor UI and re-alignment on
+  corrected text).
+- **The JamendoLyrics rights-claim correction.** An earlier version of the M4a design spec claimed
+  the dataset's Creative Commons licensing made it a straightforward, rights-clean Lane C fit.
+  Checking the dataset's actual `license_type` field before writing the eval task disproved that:
+  most tracks are **CC BY-NC-ND / CC BY-NC-SA** — non-commercial, and ND ("No Derivatives")
+  specifically forbids creating derivative works, which running Demucs separation and forced
+  alignment on the audio is. This is not the product's Lane C path and no track from this dataset
+  may ever be uploaded through `/tracks/upload` or stored via the product's own pipeline. The eval
+  script was written to a hard constraint instead: ephemeral processing only (every derived
+  artifact deleted immediately after each track is scored, in a `finally` block), any
+  `license_type` containing `"ND"` skipped entirely before any audio is touched, and only the
+  aggregate numbers in `docs/BENCHMARKS.md` ever committed.
+
+A real bug was found and fixed mid-Task-4: `transcribe_audio()` originally raised
+`TranscriptionError("transcription produced no words")` whenever Whisper's `base` model detected
+zero speech segments — including the legitimate case of an audio segment that genuinely has no
+speech in it. This was wrong: "no speech detected" is a supported empty result, not an error
+condition, consistent with how missing lyric-display rights is already handled as a degraded state
+rather than a failure. Fixed in `services/api/app/transcription.py` (commit `b622e7d`) to return an
+empty `TranscriptionResult` instead of raising, with two new tests covering the empty-result path
+and the original happy-path test corrected to check shape rather than specific content.
+
+Deliberately deferred, matching the design spec's own scope decisions:
+- **M4b's lyric correction editor UI and re-alignment on corrected text.** No frontend work
+  happened this milestone; `apps/web` is still the unmodified Next.js starter.
+- **Commercially-licensed multilingual forced alignment.** `torchaudio.pipelines.MMS_FA` (the
+  obvious choice — wav2vec2 trained on 1,130 languages) is CC-BY-NC 4.0, non-commercial-only, and
+  Songbox is a commercial product. Non-English tracks are scored only through the whisper-native
+  path in this milestone's eval, not through forced alignment. A real, open question for a later
+  milestone: whether a genuinely commercially-licensed multilingual aligner exists, and if not,
+  what the actual fallback story is for non-English lyrics.
+- **The RQ/async job queue.** Transcription is a synchronous `POST /tracks/{id}/transcribe`, same
+  shape as M3's separation endpoint — still deferred until a milestone's shape makes the real job-
+  orchestration needs clear, per M3's own deferral reasoning.
+- **Container-level GPU worker sandboxing.** Still M7's job per ADR-0001; the `local` gpu_backend
+  built this milestone gets process-level resource limits and a caller-supplied timeout, not the
+  network-egress-denial sandbox the spec's cloud backend requires.
 
 ## Done — M3 complete
 
@@ -345,8 +435,11 @@ findings, all fixed:
 
 ## In flight
 
-- Nothing mid-work right now. M0, M1, M2, and M3 are all done. M4 (transcription + alignment) has
-  not been started.
+- Nothing mid-work right now. M0, M1, M2, M3, and M4a are all done. M4b (lyric correction editor
+  UI + re-alignment) has not been started. M4a's measured aligned-English accuracy (68.2ms median,
+  37.2% within 50ms) does not meet `docs/PLAN.md`'s ±50ms acceptance criterion — see M4a's entry
+  above — and that gap has not yet been resolved; it awaits a human decision at the final
+  whole-branch review.
 
 ## Blocked
 
@@ -355,11 +448,10 @@ findings, all fixed:
 
 ## Next three actions
 
-1. Start M4 (transcription + alignment, per `docs/PLAN.md`): Whisper on the isolated vocal stem M3
-   now produces (never the full mix, per `CLAUDE.md`), wav2vec2 forced alignment, word timings with
-   confidence, the lyric correction editor, re-alignment on corrected text. This is also the
-   milestone that should revisit the ADR-0001 `gpu_backend` interface deferral M3 documented — a
-   second GPU-calling stage is what makes the interface's real shape clear.
-2. Push to a GitHub remote (once one exists) to get CI actually running.
-3. Get a real AcoustID API key, so `HTTPAcoustIDClient` can be exercised against the live service at
-   least once instead of only the fixture double.
+1. Whole-branch review of M4a, including a real decision on the ±50ms accuracy gap above (revisit
+   the model/approach, adjust the target, or something else) before M4b's editor UI is built on top
+   of it.
+2. Start M4b (lyric correction editor UI + re-alignment on corrected text, per
+   `docs/superpowers/specs/2026-08-21-alignment-engine-design.md`'s M4/M4b split) — this repo's
+   first real frontend surface; `apps/web` is still the unmodified Next.js starter.
+3. Push to a GitHub remote (once one exists) to get CI actually running.

@@ -26,6 +26,9 @@ dev = [
     "mypy>=1.13",
     "pytest>=8.3",
 ]
+eval = [
+    "datasets>=2.14",
+]
 
 [tool.setuptools]
 # alembic/ has real .py files (env.py, versions/*.py) but is Alembic's own convention, not a
