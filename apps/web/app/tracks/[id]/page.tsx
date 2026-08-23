@@ -1,7 +1,19 @@
 "use client";
 
+import Link from "next/link";
 import { use, useEffect, useState } from "react";
 import { getTranscription, realignTrack, type TranscriptionResponse } from "@/lib/api";
+
+function BackToTracksLink() {
+  return (
+    <Link
+      href="/tracks"
+      className="mb-4 inline-block text-sm font-medium text-blue-600 hover:underline"
+    >
+      &larr; Back to tracks
+    </Link>
+  );
+}
 
 export default function TrackEditorPage(props: PageProps<"/tracks/[id]">) {
   const { id } = use(props.params);
@@ -36,6 +48,7 @@ export default function TrackEditorPage(props: PageProps<"/tracks/[id]">) {
   if (error && transcription === null) {
     return (
       <main className="max-w-2xl mx-auto py-12 px-6">
+        <BackToTracksLink />
         <p className="text-red-600">Could not load transcription: {error}</p>
       </main>
     );
@@ -51,6 +64,7 @@ export default function TrackEditorPage(props: PageProps<"/tracks/[id]">) {
   if (!transcription.lyrics_display_allowed) {
     return (
       <main className="max-w-2xl mx-auto py-12 px-6">
+        <BackToTracksLink />
         <h1 className="text-2xl font-semibold mb-4">Track {id}</h1>
         <p className="rounded bg-zinc-100 p-4 text-zinc-700">
           Lyric display isn&apos;t permitted for this track, so there&apos;s nothing to correct.
@@ -62,6 +76,7 @@ export default function TrackEditorPage(props: PageProps<"/tracks/[id]">) {
   if (transcription.language !== "en") {
     return (
       <main className="max-w-2xl mx-auto py-12 px-6">
+        <BackToTracksLink />
         <h1 className="text-2xl font-semibold mb-4">Track {id}</h1>
         <p className="rounded bg-zinc-100 p-4 text-zinc-700">
           Correction editing is English-only right now (detected language:{" "}
@@ -83,6 +98,7 @@ export default function TrackEditorPage(props: PageProps<"/tracks/[id]">) {
 
   return (
     <main className="max-w-2xl mx-auto py-12 px-6">
+      <BackToTracksLink />
       <h1 className="text-2xl font-semibold mb-4">Track {id}</h1>
       <div className="flex flex-wrap gap-2 mb-6">
         {wordTexts.map((text, idx) => (
@@ -98,9 +114,14 @@ export default function TrackEditorPage(props: PageProps<"/tracks/[id]">) {
           />
         ))}
       </div>
+      {wordTexts.length === 0 && (
+        <p className="mb-4 text-sm text-zinc-500">
+          No words to correct &mdash; this track has no detected speech.
+        </p>
+      )}
       <button
         onClick={handleSave}
-        disabled={saving}
+        disabled={saving || wordTexts.length === 0}
         className="rounded bg-blue-600 px-4 py-2 text-white text-sm font-medium disabled:opacity-50"
       >
         {saving ? "Saving..." : "Save & re-align"}
