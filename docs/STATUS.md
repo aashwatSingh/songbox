@@ -33,7 +33,7 @@ What was built:
   this same team, which `docs/PLAN.md`'s original wording called for (see "Spec corrections"
   below).
 
-77 tests pass; `ruff check .` and `mypy app` (strict) both clean.
+81 tests pass; `ruff check .` and `mypy app` (strict) both clean.
 
 **The measured result does not meet `docs/PLAN.md`'s own M4 acceptance criterion.** PLAN.md states:
 "*Done when:* measured word-onset error is within ±50ms median." The real, measured number for the
@@ -456,9 +456,10 @@ findings, all fixed:
 
 ## Next three actions
 
-1. Whole-branch review of M4a, including a real decision on the ±50ms accuracy gap above (revisit
-   the model/approach, adjust the target, or something else) before M4b's editor UI is built on top
-   of it.
+1. Close `docs/PLAN.md` open question 5 (the ±50ms accuracy gap): try a larger wav2vec2 variant,
+   check whether the separated vocal stem's audio quality degrades alignment precision versus the
+   original mix, or investigate a systematic bias in the frame-to-millisecond conversion. Real work,
+   not a merge blocker — should land before M6's word-highlight UX depends on tight timing.
 2. Start M4b (lyric correction editor UI + re-alignment on corrected text, per
    `docs/superpowers/specs/2026-08-21-alignment-engine-design.md`'s M4/M4b split) — this repo's
    first real frontend surface; `apps/web` is still the unmodified Next.js starter.

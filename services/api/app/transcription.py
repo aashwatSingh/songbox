@@ -141,8 +141,10 @@ def align_words(path: Path, text: str) -> list[Word]:
     # structural tokens the model uses internally, not alignable characters. Including them here
     # meant any word containing a literal hyphen (e.g. "well-known") tokenized to include index 0,
     # and torchaudio.functional.forced_align(..., blank=0) rejects any target tensor that contains
-    # the blank index outright. This mirrors torchaudio's own bundle.get_dict() helper, which
-    # excludes both for the same reason.
+    # the blank index outright. (WAV2VEC2_ASR_BASE_960H is a Wav2Vec2ASRBundle, which has no
+    # get_dict() helper to borrow this from -- that method exists only on Wav2Vec2FABundle/MMS_FA,
+    # and its version actually keeps the blank in, since MMS_FA's own alignment code strips it
+    # elsewhere. Don't "fix" this exclusion by pointing at that helper.)
     dictionary = {c: i for i, c in enumerate(labels) if c not in ("-", "|")}
 
     # Words that reduce to zero alignable characters (a bare numeral like "1979", the "♪" symbol
