@@ -26,6 +26,7 @@ from app.transcription import (
     DEFAULT_WHISPER_MODEL_SIZE,
     AlignmentError,
     TranscriptionError,
+    align_words,
     run_transcription_and_alignment,
 )
 from app.validation import detect_audio_format
@@ -570,5 +571,114 @@ def get_transcription(
     ).scalar_one_or_none()
     if transcription is None:
         raise HTTPException(status_code=404, detail="no transcription found for this track")
+
+    return _transcription_to_response(transcription)
+
+
+class RealignRequest(BaseModel):
+    text: str
+
+
+@router.post("/tracks/{track_id}/realign", response_model=TranscribeResponse)
+def realign_track(
+    track_id: uuid.UUID,
+    body: RealignRequest,
+    identity: Identity = Depends(get_identity),
+    db: Session = Depends(get_db),
+) -> TranscribeResponse:
+    track = db.get(Track, track_id)
+    if track is None or track.tenant_id != identity.tenant_id:
+        raise HTTPException(status_code=404, detail="track not found")
+    if track.status != "passed":
+        raise HTTPException(
+            status_code=409,
+            detail=f"track has not passed the rights gate (status={track.status})",
+        )
+
+    latest = db.execute(
+        select(Transcription)
+        .where(Transcription.track_id == track.id)
+        .order_by(Transcription.created_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if latest is None:
+        raise HTTPException(
+            status_code=409, detail="no transcription found -- run /transcribe first"
+        )
+    if not latest.lyrics_display_allowed:
+        raise HTTPException(
+            status_code=409, detail="lyric correction is not available for this track"
+        )
+    if latest.language != "en":
+        raise HTTPException(
+            status_code=409,
+            detail="correction/re-alignment is only available for English tracks",
+        )
+
+    vocals_stem = db.execute(
+        select(Stem).where(Stem.track_id == track.id, Stem.stem_type == "vocals").limit(1)
+    ).scalar_one_or_none()
+    if vocals_stem is None:
+        raise HTTPException(
+            status_code=409, detail="track has no vocals stem -- run /separate first"
+        )
+
+    minio_client = get_minio_client()
+    vocal_bytes = fetch_track_file(minio_client, vocals_stem.storage_key)
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    try:
+        tmp.write(vocal_bytes)
+        tmp.flush()
+        tmp.close()
+        try:
+            words = run_inference(
+                lambda: align_words(Path(tmp.name), body.text),
+                timeout_seconds=TRANSCRIPTION_TIMEOUT_SECONDS,
+            )
+        except BackendBusyError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except BackendTimeoutError as exc:
+            raise HTTPException(status_code=504, detail=str(exc)) from exc
+        except AlignmentError as exc:
+            # Deliberately NOT interpolating `exc` -- same reasoning as /transcribe's mapping.
+            raise HTTPException(
+                status_code=422, detail="could not align transcript to audio"
+            ) from exc
+    finally:
+        Path(tmp.name).unlink(missing_ok=True)
+
+    declaration = db.get(RightsDeclaration, track.rights_declaration_id)
+    if declaration is None:
+        raise RuntimeError(f"track {track.id} has no rights declaration -- data integrity error")
+    license_covers_lyrics: bool | None = None
+    if declaration.license_id is not None:
+        license_row = db.get(License, declaration.license_id)
+        license_covers_lyrics = license_row.covers_lyrics if license_row else None
+    lyrics_display_allowed = resolve_lyrics_display_allowed(declaration.lane, license_covers_lyrics)
+
+    words_json = [
+        {
+            "idx": w.idx,
+            "text": w.text,
+            "start_ms": w.start_ms,
+            "end_ms": w.end_ms,
+            "confidence": w.confidence,
+        }
+        for w in words
+    ]
+    transcription = Transcription(
+        id=uuid.uuid4(),
+        tenant_id=identity.tenant_id,
+        track_id=track.id,
+        whisper_model="user-corrected",
+        aligner="wav2vec2",
+        language="en",
+        lyrics_display_allowed=lyrics_display_allowed,
+        words=words_json,
+        created_at=datetime.now(UTC),
+    )
+    db.add(transcription)
+    db.flush()
 
     return _transcription_to_response(transcription)
