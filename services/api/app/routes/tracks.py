@@ -69,11 +69,22 @@ TRANSCRIPTION_TIMEOUT_SECONDS = 1800
 ALLOWED_PITCH_MODELS = ("tiny", "full")
 DEFAULT_PITCH_MODEL = "tiny"
 
+# The karaoke_packages schema version this endpoint writes for every row -- CLAUDE.md: "karaoke.json
+# is a versioned schema. Any shape change needs a migration path, not a silent bump." A named
+# constant gives a future schema bump one obvious place to change, instead of a bare literal below.
+KARAOKE_SCHEMA_VERSION = 1
+
 # Packaging runs pitch extraction (torchcrepe) and structure detection (librosa) as one
 # run_inference() call -- see docs/BENCHMARKS.md's M5 section for real measured numbers. Same
 # "one heavy job at a time on this box" reasoning as SEPARATION_TIMEOUT_SECONDS/
-# TRANSCRIPTION_TIMEOUT_SECONDS above.
-PACKAGE_TIMEOUT_SECONDS = 1800
+# TRANSCRIPTION_TIMEOUT_SECONDS above, but the bound itself has to be picked from the real
+# numbers, not copied from those two: the `full` CREPE model measured at 0.31x realtime
+# (docs/BENCHMARKS.md's M5 section), and this project's max track duration is capped at 720s
+# (fingerprint.py's MAX_DURATION_SECONDS), so a `full`-model request on a track near that cap
+# can take up to roughly 720 / 0.31 =~ 2323s of wall clock. A 1800s bound would guarantee a 504
+# on that worst case even on a healthy system; 3600s (1 hour) leaves real headroom above the
+# measured ~2323s worst case instead.
+PACKAGE_TIMEOUT_SECONDS = 3600
 
 
 def _read_upload_capped(upload: UploadFile, limit: int) -> bytes:
@@ -828,7 +839,7 @@ def package_track(
         id=uuid.uuid4(),
         tenant_id=identity.tenant_id,
         track_id=track.id,
-        schema_version=1,
+        schema_version=KARAOKE_SCHEMA_VERSION,
         words=words_json,
         pitch_model=result.pitch_model,
         pitch=[

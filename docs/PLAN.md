@@ -156,6 +156,18 @@ milestone reaches them):
    model (identity provider, tenant provisioning, migration path for existing dev-stub data)?
    Genuinely open -- not silently assumed solved.
 
+10. **New in M5.** `docs/PLAN.md`'s original M5 entry called for "`karaoke.json` v1 emitted and
+    schema-validated," but the approved M5 design spec
+    (`docs/superpowers/specs/2026-08-23-pitch-structure-design.md`) narrowed this to flat DB
+    columns on a new `karaoke_packages` table -- no assembled `karaoke.json` JSON document, no
+    JSON Schema validation, and no read (`GET`) endpoint. This was discussed with the project
+    owner and decided, not silently narrowed: M5 stays extraction-only (pitch contour, beat grid,
+    section boundaries, all written as flat columns via `POST /tracks/{id}/package`), and M6 (the
+    player milestone -- the actual consumer of this data) is responsible for adding a new
+    `GET /tracks/{id}/package` read endpoint, assembling the stored columns into the versioned
+    `karaoke.json` v1 shape, and adding schema validation, before the player ever consumes this
+    data. Genuinely open until M6 -- not silently assumed solved.
+
 Resolved during this planning pass (see `docs/DECISIONS_LOG.md` for full reasoning):
 
 6. Local infra without Docker installed → Docker Desktop on WSL2, install before M0.

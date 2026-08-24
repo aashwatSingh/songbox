@@ -2,6 +2,97 @@
 
 Last updated: 2026-08-23.
 
+## Done — M5 complete
+
+M5's scope per `docs/superpowers/specs/2026-08-23-pitch-structure-design.md` (pitch extraction via
+CREPE, beat/structure detection via librosa, and a new `POST /tracks/{track_id}/package` endpoint
+that persists both) is built and verified end to end, across four tasks:
+
+What was built:
+- **`karaoke_packages` table** (migration 0006) — tenant-scoped like every other table in this
+  schema (`ENABLE`+`FORCE` RLS, `tenant_isolation` policy, grant to `songbox_app`), storing
+  `schema_version`, a copy of the track's most recent `Transcription.words` (text nulled per
+  `lyrics_display_allowed`, same rule M4a's response layer already applies, now applied at write
+  time too), `pitch_model`, `pitch` (JSONB pitch-frame list), `tempo_bpm`, `beats_ms`,
+  `sections_ms`, and `created_at`. Immutable, append-only, same pattern as `Transcription`.
+- **`services/api/app/packaging.py`** — `synthesize_accompaniment()` (sums the three non-vocal
+  stems, peak-normalized, a transient artifact never persisted to MinIO), `extract_pitch()`
+  (`torchcrepe.predict` against the isolated vocals stem, frames below
+  `CREPE_CONFIDENCE_THRESHOLD` marked unvoiced), and `extract_structure()` (`librosa.beat
+  .beat_track` for tempo/beats, falling back to `librosa.feature.rhythm.tempo` when no onset
+  signal is found, plus `librosa.segment.agglomerative` chroma-similarity section boundaries at a
+  duration-derived `k`).
+- **`POST /tracks/{track_id}/package`** — gated on track status `passed`, all four stems present,
+  and a transcription existing, all checked before any model call, each proven by a
+  non-invocation test. Runs pitch extraction and structure detection through the same
+  `run_inference`/timeout-bound pattern as `/separate` and `/transcribe`.
+- **`services/api/scripts/benchmark_pitch.py`** + `docs/BENCHMARKS.md`'s M5 section — real,
+  CPU-measured CREPE numbers for both `tiny` and `full` against a synthetic 3-minute 220Hz tone:
+  `tiny` 31.6s wall clock (5.69x realtime), `full` 587.2s (0.31x realtime), both producing 18001
+  frames. This is the basis for `tiny` as the default pitch model, with `full` as an explicit
+  slower opt-in.
+
+98 tests pass (up from M4b's 90); `ruff check .` and `mypy app` (strict) both clean.
+
+A final whole-branch review found 12 real issues across the four already task-reviewed tasks, all
+fixed in one pass:
+- **Critical — `test_package_rejects_track_that_has_not_passed_the_gate` didn't actually test the
+  rights gate.** It uploaded a track that PASSED the gate, then asserted 409 for a different reason
+  (missing stems) — a near-duplicate of `test_package_rejects_track_missing_a_stem`, leaving the
+  `status != "passed"` check in `package_track` with zero real test coverage on a GPU-facing
+  endpoint. Rewritten to mirror `test_tracks_transcribe.py`'s equivalent test exactly: a
+  `FixtureAcoustIDClient` seeded with a real matched fingerprint holds the track at
+  `pending_review`, and 409 is asserted against that genuinely-not-passed track.
+- **Important — `PACKAGE_TIMEOUT_SECONDS` (1800s) was provably too small for the `full` CREPE
+  model.** The measured 0.31x realtime factor against the 720s max-duration cap works out to
+  roughly 2323s worst case — guaranteed to time out under the old bound. Raised to 3600s, with the
+  comment citing the real numbers.
+- **Important — the tempo-fallback comment overstated what `librosa.feature.rhythm.tempo` measures**
+  when the primary beat tracker finds no onset content at all: in that case the fallback is
+  dominated by librosa's own internal tempo prior, not real signal. Comment corrected to say so;
+  behavior unchanged (a schema/provenance-flag fix was considered and explicitly deferred as
+  out of scope for this round).
+- **Important — the beat grid had zero real test coverage.** Every test used the sustained-sine
+  `synthetic_wav` fixture, so `librosa.beat.beat_track`'s primary onset-based path never actually
+  ran anywhere in the suite. Added
+  `test_extract_structure_finds_beats_from_real_transients` — a synthesized click track with real
+  percussive bursts — asserting genuinely non-empty `beats_ms`.
+- **Important, doc-only — the design spec's JSONB-vs-MinIO rationale ("KB-scale JSON") didn't
+  survive Task 4's real benchmark**, which serializes to roughly 1MB per 3-minute track (~4MB at
+  the 720s cap). Not a bug (Postgres JSONB TOAST handles it), but the size claim was corrected in
+  the design spec with the real number, flagged for M6's read-path planning.
+- **Important, decided/deferred — `docs/PLAN.md`'s original M5 wording called for an assembled,
+  schema-validated `karaoke.json` document and a read endpoint; the approved spec narrowed this to
+  flat DB columns, extraction-only.** Recorded as `docs/PLAN.md` open question 10: M6 owns the read
+  endpoint, JSON assembly, and schema validation.
+- **Minor — `CREPE_CONFIDENCE_THRESHOLD` had no comment** explaining it's an unvalidated
+  voiced/unvoiced cutoff, not a tuned accuracy figure. Comment added.
+- **Minor — `synthesize_accompaniment` never asserted its own output against the project's
+  44.1kHz-stereo-WAV invariant**, only that its three inputs agreed with each other. Added a
+  post-write structural check mirroring `separation.py`'s pattern, since this function produces a
+  new audio artifact rather than only consuming already-guaranteed-WAV input.
+- **Minor — `build_package` ran the slow CREPE stage before the cheap accompaniment-validation
+  stage**, so a malformed-stems error only surfaced after paying the full pitch-extraction cost.
+  Reordered so `synthesize_accompaniment`'s validation runs first.
+- **Minor — `schema_version=1` was a bare literal** in `package_track`. Added a module-level
+  `KARAOKE_SCHEMA_VERSION` constant.
+- **Minor — no NaN guard on JSONB-bound floats.** A NaN `hz` or `tempo_bpm` would serialize as the
+  bare token `NaN`, which Postgres `jsonb` rejects (an unhandled 500). Added guards in both
+  `extract_pitch` and `extract_structure` treating a NaN the same as the existing "no value"
+  case (`None` for `hz`, `0.0`/fallback-trigger for `tempo_bpm`).
+- **Minor, doc-only — `docs/STATUS.md`/`docs/PLAN.md` still described M5 as not started.** This
+  entry, plus `docs/PLAN.md` open question 10 above.
+
+Deliberately out of scope, matching the design spec's own scope decisions:
+- **Verse/chorus/bridge semantic section labels** (Decision 2) — real signal, no semantic
+  classifier this project has or is building.
+- **The player, and anything that reads `karaoke.json`** (M6) — including the assembled JSON
+  document, schema validation, and a `GET` endpoint; see `docs/PLAN.md` open question 10.
+- **Live pitch detection** — the player's problem in M6 against a live mic, `docs/PLAN.md` open
+  question 3.
+- **Closing the ±50ms alignment accuracy gap** (`docs/PLAN.md` open question 5) — unrelated,
+  separate work.
+
 ## Done — M4b complete
 
 M4b's scope per `docs/superpowers/specs/2026-08-23-lyric-correction-editor-design.md` (the lyric
@@ -535,26 +626,30 @@ findings, all fixed:
 
 ## In flight
 
-- Nothing mid-work right now. M0, M1, M2, M3, M4a, and M4b are all done. M4a's measured
+- Nothing mid-work right now. M0, M1, M2, M3, M4a, M4b, and M5 are all done. M4a's measured
   aligned-English accuracy (68.2ms median, 37.2% within 50ms) does not meet `docs/PLAN.md`'s
   ±50ms acceptance criterion — see M4a's entry below. That decision has been made, not left
   pending: merge M4a as engineering-complete with the gap documented, tracked as real follow-up
   work (`docs/PLAN.md` open question 5, commit `d3ff5ff`), not a merge blocker. Real
   authentication remains a genuine, tracked gap across the whole project — `docs/PLAN.md` open
-  question 9.
+  question 9. M5's narrowed scope (extraction-only, no assembled `karaoke.json`, no read endpoint)
+  is tracked as `docs/PLAN.md` open question 10, owned by M6.
 
 ## Blocked
 
 - **No GitHub remote configured yet**, so `.github/workflows/ci.yml` has only been reasoned about, not
-  actually run by GitHub Actions. Not blocking M4 work, only CI-on-push.
+  actually run by GitHub Actions. Not blocking M4/M5 work, only CI-on-push.
 
 ## Next three actions
 
-1. Close `docs/PLAN.md` open question 5 (the ±50ms accuracy gap): try a larger wav2vec2 variant,
+1. Start M6 (the player — Web Audio playback, word highlight, pitch lane, live mic pitch,
+   transposition, stem mixer, calibration). M6 also owns `docs/PLAN.md` open question 10 (the
+   `GET /tracks/{id}/package` read endpoint, `karaoke.json` v1 assembly, and schema validation)
+   and open question 3 (live pitch detection under mic bleed).
+2. Close `docs/PLAN.md` open question 5 (the ±50ms accuracy gap): try a larger wav2vec2 variant,
    check whether the separated vocal stem's audio quality degrades alignment precision versus the
    original mix, or investigate a systematic bias in the frame-to-millisecond conversion. Real work,
    not a merge blocker — should land before M6's word-highlight UX depends on tight timing.
-2. Start M5 (pitch + structure — CREPE contour, beat grid, sections, `karaoke.json` v1).
 3. Push to a GitHub remote (once one exists) to get CI actually running. Also revisit
    `docs/PLAN.md` open question 9 (real authentication) whenever a milestone's scope can actually
    absorb it.

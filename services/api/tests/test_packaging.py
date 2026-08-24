@@ -53,6 +53,11 @@ def test_extract_pitch_produces_well_formed_frames(synthetic_wav: Path) -> None:
 
 
 def test_extract_structure_produces_well_formed_result(synthetic_wav: Path, tmp_path: Path) -> None:
+    # synthetic_wav is a pure sustained sine tone -- no attack transients for beat_track's
+    # dynamic-programming beat picker to lock onto, so this exercises extract_structure's FALLBACK
+    # tempo path specifically (librosa.feature.rhythm.tempo, per packaging.py's comment at that
+    # call site), not beat_track's primary onset-based path. beats_ms is legitimately empty here.
+    # See test_extract_structure_finds_beats_from_real_transients below for the primary path.
     accompaniment_path = synthesize_accompaniment(
         synthetic_wav, synthetic_wav, synthetic_wav, tmp_path
     )
@@ -65,6 +70,45 @@ def test_extract_structure_produces_well_formed_result(synthetic_wav: Path, tmp_
     assert len(result.sections_ms) > 0
     assert result.sections_ms[0] == 0
     assert result.sections_ms == sorted(result.sections_ms)
+
+
+def test_extract_structure_finds_beats_from_real_transients(tmp_path: Path) -> None:
+    # Every other test in this file (and every other test in this suite that reaches
+    # extract_structure) uses synthetic_wav, a pure sustained sine tone with no rhythmic content --
+    # so librosa.beat.beat_track's PRIMARY onset-based beat detection is never actually exercised
+    # anywhere; beats_ms is always empty and tempo_bpm always comes from the fallback estimator.
+    # Build a real "click track" -- periodic percussive noise bursts with a fast decay envelope,
+    # the kind of audio beat_track's dynamic-programming beat picker is designed to lock onto -- to
+    # genuinely exercise the primary path, with non-empty beats_ms as proof it ran.
+    sample_rate = 44100
+    bpm = 120.0
+    beat_interval_s = 60.0 / bpm
+    duration_s = 8.0
+    num_samples = int(duration_s * sample_rate)
+    rng = np.random.default_rng(seed=0)
+    y = np.zeros(num_samples, dtype=np.float32)
+
+    click_duration_s = 0.03
+    click_samples = int(click_duration_s * sample_rate)
+    decay = np.exp(-np.linspace(0, 12, click_samples)).astype(np.float32)
+    beat_time = 0.0
+    while beat_time < duration_s:
+        start = int(beat_time * sample_rate)
+        end = min(start + click_samples, num_samples)
+        length = end - start
+        y[start:end] += rng.standard_normal(length).astype(np.float32) * decay[:length]
+        beat_time += beat_interval_s
+
+    peak = float(np.abs(y).max())
+    assert peak > 0
+    y = y / peak * 0.9
+    click_path = tmp_path / "click_track.wav"
+    sf.write(str(click_path), np.stack([y, y], axis=1), sample_rate)
+
+    result = extract_structure(click_path)
+
+    assert len(result.beats_ms) > 0
+    assert result.tempo_bpm > 0
 
 
 def test_build_package_orchestrates_all_three_stages(synthetic_wav: Path) -> None:

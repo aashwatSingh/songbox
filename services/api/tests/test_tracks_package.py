@@ -8,7 +8,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.acoustid.client import FixtureAcoustIDClient
+from app.acoustid.fixtures import KNOWN_MATCH_RESULT
 from app.db import db_session_for_tenant
+from app.fingerprint import fingerprint_audio
 from app.main import app
 from app.models import Transcription
 from app.routes.tracks import get_acoustid_client
@@ -146,7 +148,14 @@ def test_package_rejects_track_that_has_not_passed_the_gate(
 
     monkeypatch.setattr("app.routes.tracks.build_package", _fail_if_called)
 
-    app.dependency_overrides[get_acoustid_client] = lambda: FixtureAcoustIDClient({})
+    # Mirrors test_tracks_transcribe.py's not-passed-gate test: a FixtureAcoustIDClient seeded
+    # with a real KNOWN_MATCH_RESULT for this exact fingerprint makes Lane A hold on upload, so
+    # track.status stays "pending_review" -- a genuinely not-passed track, not a
+    # passed-but-unseparated one (that's test_package_rejects_track_missing_a_stem below).
+    known_fp = fingerprint_audio(synthetic_wav)
+    app.dependency_overrides[get_acoustid_client] = lambda: FixtureAcoustIDClient(
+        {known_fp.value: KNOWN_MATCH_RESULT}
+    )
     try:
         with synthetic_wav.open("rb") as fh:
             upload_response = client.post(
@@ -157,14 +166,12 @@ def test_package_rejects_track_that_has_not_passed_the_gate(
             )
     finally:
         app.dependency_overrides.pop(get_acoustid_client, None)
+    assert upload_response.json()["status"] == "pending_review"
     track_id = upload_response.json()["track_id"]
-    assert upload_response.json()["status"] == "passed"
-    # Deliberately not separated -- status is "passed" but this test targets a different gate
-    # below by using a track that never gets separated or transcribed instead. See the next test
-    # for the explicit not-passed case using a held track.
 
     response = client.post(f"/tracks/{track_id}/package", headers=HEADERS)
-    assert response.status_code == 409  # missing stems, since /separate was never called
+
+    assert response.status_code == 409
 
 
 def test_package_rejects_track_missing_a_stem(

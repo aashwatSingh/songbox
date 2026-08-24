@@ -86,6 +86,14 @@ MB-scale audio), consistent with every other JSONB-shaped document already in th
 no new storage subsystem. `Stem` files justified MinIO because they're genuinely large binary audio;
 `karaoke.json` is neither large nor binary.
 
+**Post-hoc correction (recorded after Task 4's real benchmark, not assumed up front):** the "KB-scale"
+estimate above did not survive measurement. Task 4's real frame count is 18001 pitch frames for a
+3-minute track (`docs/BENCHMARKS.md`'s M5 section), which serializes to roughly **1MB of JSON per
+3-minute track**, and roughly **4MB per row at this project's 720s max-duration cap**. This is not a
+bug — Postgres JSONB TOAST handles multi-megabyte values fine — but the original size rationale was
+inaccurate at the scale this milestone actually measured. M6 (the player, the actual consumer of this
+column) should plan its read path assuming MB-scale payloads per row, not KB-scale.
+
 ### Decision 4: CREPE defaults to `model='tiny'`, benchmarked against `'full'`
 
 Same pattern as M3's `htdemucs`-before-`htdemucs_ft` and M4a's Whisper-`base`-before-larger-sizes: start
