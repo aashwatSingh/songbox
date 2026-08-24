@@ -42,7 +42,7 @@ def _upload_pass_and_separate_track(synthetic_wav: Path) -> str:
     return track_id
 
 
-def _insert_transcription(track_id: str) -> None:
+def _insert_transcription(track_id: str, *, lyrics_display_allowed: bool = True) -> None:
     session = db_session_for_tenant(uuid.UUID(HEADERS["X-Dev-Tenant-Id"]))
     try:
         session.add(
@@ -53,7 +53,7 @@ def _insert_transcription(track_id: str) -> None:
                 whisper_model="base",
                 aligner="wav2vec2",
                 language="en",
-                lyrics_display_allowed=True,
+                lyrics_display_allowed=lyrics_display_allowed,
                 words=[
                     {"idx": 0, "text": "hello", "start_ms": 0, "end_ms": 400, "confidence": 0.9},
                     {"idx": 1, "text": "world", "start_ms": 400, "end_ms": 800, "confidence": 0.9},
@@ -97,6 +97,45 @@ def test_package_stores_a_karaoke_package_with_real_pitch_and_structure(
     assert len(rows) == 1
     assert rows[0].schema_version == 1
     assert rows[0].pitch_model == "tiny"
+
+
+def test_package_nulls_word_text_when_lyrics_display_is_not_allowed(
+    synthetic_wav: Path,
+) -> None:
+    track_id = _upload_pass_and_separate_track(synthetic_wav)
+    _insert_transcription(track_id, lyrics_display_allowed=False)
+
+    response = client.post(f"/tracks/{track_id}/package", headers=HEADERS)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["words"]) == 2
+    for word in body["words"]:
+        assert word["text"] is None
+        assert word["start_ms"] is not None
+        assert word["end_ms"] is not None
+        assert word["confidence"] is not None
+        assert word["idx"] is not None
+
+    session = db_session_for_tenant(uuid.UUID(HEADERS["X-Dev-Tenant-Id"]))
+    try:
+        rows = session.execute(
+            __import__("sqlalchemy").text(
+                "SELECT words FROM karaoke_packages WHERE track_id = :track_id"
+            ),
+            {"track_id": track_id},
+        ).all()
+    finally:
+        session.close()
+    assert len(rows) == 1
+    stored_words = rows[0].words
+    assert len(stored_words) == 2
+    for word in stored_words:
+        assert word["text"] is None
+        assert word["start_ms"] is not None
+        assert word["end_ms"] is not None
+        assert word["confidence"] is not None
+        assert word["idx"] is not None
 
 
 def test_package_rejects_track_that_has_not_passed_the_gate(
