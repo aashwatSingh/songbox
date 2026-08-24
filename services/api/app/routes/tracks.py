@@ -19,7 +19,21 @@ from app.db import get_db
 from app.fingerprint import FingerprintError, fingerprint_audio
 from app.gate import resolve_lane_outcome, resolve_lyrics_display_allowed
 from app.gpu_backend import BackendBusyError, BackendTimeoutError, run_inference
-from app.models import FingerprintMatch, License, RightsDeclaration, Stem, Track, Transcription
+from app.models import (
+    FingerprintMatch,
+    KaraokePackage,
+    License,
+    RightsDeclaration,
+    Stem,
+    Track,
+    Transcription,
+)
+from app.packaging import (
+    AccompanimentError,
+    PitchExtractionError,
+    StructureExtractionError,
+    build_package,
+)
 from app.separation import SeparationError, separate_audio
 from app.storage import fetch_track_file, get_minio_client, save_track_file
 from app.transcription import (
@@ -51,6 +65,15 @@ ALLOWED_WHISPER_MODEL_SIZES = ("tiny", "base", "small", "medium", "large-v3")
 # box" reasoning as SEPARATION_TIMEOUT_SECONDS above. Using the same 1800s bound until real
 # numbers say otherwise.
 TRANSCRIPTION_TIMEOUT_SECONDS = 1800
+
+ALLOWED_PITCH_MODELS = ("tiny", "full")
+DEFAULT_PITCH_MODEL = "tiny"
+
+# Packaging runs pitch extraction (torchcrepe) and structure detection (librosa) as one
+# run_inference() call -- see docs/BENCHMARKS.md's M5 section for real measured numbers. Same
+# "one heavy job at a time on this box" reasoning as SEPARATION_TIMEOUT_SECONDS/
+# TRANSCRIPTION_TIMEOUT_SECONDS above.
+PACKAGE_TIMEOUT_SECONDS = 1800
 
 
 def _read_upload_capped(upload: UploadFile, limit: int) -> bytes:
@@ -699,3 +722,141 @@ def realign_track(
     db.flush()
 
     return _transcription_to_response(transcription)
+
+
+class PackageRequest(BaseModel):
+    pitch_model: str = DEFAULT_PITCH_MODEL
+
+
+class PackageResponse(BaseModel):
+    track_id: uuid.UUID
+    schema_version: int
+    words: list[WordInfo]
+    pitch_model: str
+    tempo_bpm: float
+    beats_ms: list[int]
+    sections_ms: list[int]
+
+
+@router.post("/tracks/{track_id}/package", response_model=PackageResponse)
+def package_track(
+    track_id: uuid.UUID,
+    body: PackageRequest | None = None,
+    identity: Identity = Depends(get_identity),
+    db: Session = Depends(get_db),
+) -> PackageResponse:
+    pitch_model = body.pitch_model if body is not None else DEFAULT_PITCH_MODEL
+    if pitch_model not in ALLOWED_PITCH_MODELS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"pitch_model must be one of {ALLOWED_PITCH_MODELS}",
+        )
+
+    track = db.get(Track, track_id)
+    if track is None or track.tenant_id != identity.tenant_id:
+        raise HTTPException(status_code=404, detail="track not found")
+    if track.status != "passed":
+        raise HTTPException(
+            status_code=409,
+            detail=f"track has not passed the rights gate (status={track.status})",
+        )
+
+    stem_rows = db.execute(select(Stem).where(Stem.track_id == track.id)).scalars().all()
+    # setdefault picks the first row per stem_type in query order -- arbitrary if /separate was
+    # ever called more than once for this track (M3's known, deliberately-deferred idempotency
+    # gap), same reasoning as transcribe_track's vocals-stem lookup above.
+    stems_by_type: dict[str, Stem] = {}
+    for stem in stem_rows:
+        stems_by_type.setdefault(stem.stem_type, stem)
+    missing_stem_types = {"vocals", "drums", "bass", "other"} - set(stems_by_type)
+    if missing_stem_types:
+        raise HTTPException(
+            status_code=409,
+            detail=f"track is missing stems: {sorted(missing_stem_types)} -- run /separate first",
+        )
+
+    latest_transcription = db.execute(
+        select(Transcription)
+        .where(Transcription.track_id == track.id)
+        .order_by(Transcription.created_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if latest_transcription is None:
+        raise HTTPException(
+            status_code=409, detail="no transcription found -- run /transcribe first"
+        )
+
+    minio_client = get_minio_client()
+    tmp_paths: dict[str, Path] = {}
+    try:
+        for stem_type, stem in stems_by_type.items():
+            data = fetch_track_file(minio_client, stem.storage_key)
+            tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+            tmp.write(data)
+            tmp.flush()
+            tmp.close()
+            tmp_paths[stem_type] = Path(tmp.name)
+
+        try:
+            result = run_inference(
+                lambda: build_package(
+                    vocals_path=tmp_paths["vocals"],
+                    drums_path=tmp_paths["drums"],
+                    bass_path=tmp_paths["bass"],
+                    other_path=tmp_paths["other"],
+                    pitch_model=pitch_model,
+                ),
+                timeout_seconds=PACKAGE_TIMEOUT_SECONDS,
+            )
+        except BackendBusyError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except BackendTimeoutError as exc:
+            raise HTTPException(status_code=504, detail=str(exc)) from exc
+        except (AccompanimentError, PitchExtractionError, StructureExtractionError) as exc:
+            raise HTTPException(
+                status_code=422, detail="could not package track"
+            ) from exc
+    finally:
+        for path in tmp_paths.values():
+            path.unlink(missing_ok=True)
+
+    words_json = [
+        dict(w, text=(w["text"] if latest_transcription.lyrics_display_allowed else None))
+        for w in latest_transcription.words
+    ]
+    package = KaraokePackage(
+        id=uuid.uuid4(),
+        tenant_id=identity.tenant_id,
+        track_id=track.id,
+        schema_version=1,
+        words=words_json,
+        pitch_model=result.pitch_model,
+        pitch=[
+            {"time_ms": f.time_ms, "hz": f.hz, "confidence": f.confidence} for f in result.pitch
+        ],
+        tempo_bpm=result.tempo_bpm,
+        beats_ms=result.beats_ms,
+        sections_ms=result.sections_ms,
+        created_at=datetime.now(UTC),
+    )
+    db.add(package)
+    db.flush()
+
+    return PackageResponse(
+        track_id=package.track_id,
+        schema_version=package.schema_version,
+        words=[
+            WordInfo(
+                idx=cast(int, w["idx"]),
+                start_ms=cast(int, w["start_ms"]),
+                end_ms=cast(int, w["end_ms"]),
+                confidence=cast(float, w["confidence"]),
+                text=cast("str | None", w["text"]),
+            )
+            for w in package.words
+        ],
+        pitch_model=package.pitch_model,
+        tempo_bpm=package.tempo_bpm,
+        beats_ms=package.beats_ms,
+        sections_ms=package.sections_ms,
+    )
