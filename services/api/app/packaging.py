@@ -165,11 +165,15 @@ def extract_pitch(vocals_path: Path, model: str = "tiny") -> list[PitchFrame]:
     num_frames = pitch.shape[1]
     for i in range(num_frames):
         confidence = float(periodicity[0, i])
-        hz = float(pitch[0, i]) if confidence >= CREPE_CONFIDENCE_THRESHOLD else None
-        # A NaN hz would serialize as the bare token `NaN` in JSON, which Postgres jsonb rejects
+        # A NaN would serialize as the bare token `NaN` in JSON, which Postgres jsonb rejects
         # (unlike a native float8 column) -- surfacing as an unhandled 500 rather than a clean
-        # result. Low-probability with real torchcrepe output, but PitchFrame.hz is already
-        # float | None, so treating a NaN the same as "unvoiced" is a natural, cheap guard.
+        # result. Low-probability with real torchcrepe output, but cheap to guard both fields
+        # that land in the same JSONB payload -- a NaN periodicity is exactly the condition that
+        # also produces a NaN hz, so both must be handled, not just the one PitchFrame.hz already
+        # being float | None made convenient.
+        if math.isnan(confidence):
+            confidence = 0.0
+        hz = float(pitch[0, i]) if confidence >= CREPE_CONFIDENCE_THRESHOLD else None
         if hz is not None and math.isnan(hz):
             hz = None
         frames.append(PitchFrame(time_ms=i * CREPE_HOP_MS, hz=hz, confidence=confidence))

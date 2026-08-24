@@ -32,7 +32,7 @@ What was built:
   frames. This is the basis for `tiny` as the default pitch model, with `full` as an explicit
   slower opt-in.
 
-98 tests pass (up from M4b's 90); `ruff check .` and `mypy app` (strict) both clean.
+101 tests pass (up from M4b's 90); `ruff check .` and `mypy app` (strict) both clean.
 
 A final whole-branch review found 12 real issues across the four already task-reviewed tasks, all
 fixed in one pass:
