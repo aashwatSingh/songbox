@@ -102,26 +102,45 @@ validated against a stable notion of what the artifact *is*. The API response wr
 ```json
 {
   "karaoke": { /* the schema-validated v1 document above */ },
-  "stem_urls": {"drums": "https://...", "bass": "https://...", "other": "https://..."}
+  "stem_urls": {"drums": "/tracks/{id}/stems/drums", "bass": "/tracks/{id}/stems/bass", "other": "/tracks/{id}/stems/other"}
 }
 ```
+
+(Field name `stem_urls` is kept even though these are now same-origin API paths rather than presigned
+URLs — see Decision 4's correction — since the frontend still treats them identically: paths to
+`fetch()` audio bytes from, resolved against the same `NEXT_PUBLIC_API_BASE_URL` every other
+`apps/web/lib/api.ts` call already uses.)
 
 The JSON Schema itself lives in a new small module, `services/api/app/karaoke_schema.py`, as a plain
 Python dict (`KARAOKE_SCHEMA_V1`) — no separate `.json` asset file, since the schema is code-adjacent
 to the one function that both produces and validates against it, and this repo doesn't otherwise ship
 non-Python data files from `app/`.
 
-## Decision 4: presigned URLs — short expiry, tenant-checked before minting, never logged
+## Decision 4 (corrected during plan-writing): stem audio proxied through FastAPI, not presigned MinIO URLs
 
-`CLAUDE.md` already states "never log raw audio, lyrics, or signed URLs" — this endpoint is the first
-one to mint any, so that rule becomes load-bearing here for the first time, not just a standing
-principle. The three URLs are minted only after the same tenant-ownership check every other endpoint
-performs (404 before any storage call), using `Minio.presigned_get_object(bucket, storage_key,
-expires=timedelta(hours=1))`. One hour comfortably covers a single listening session without the URL
-becoming a long-lived credential. If a stem is somehow missing (shouldn't happen if a `KaraokePackage`
-row exists, since packaging itself required all four stems — but not physically impossible if a stem
-was deleted out-of-band), minting fails closed: the whole `GET /package` call raises 500 rather than
-silently returning a response with fewer than three stem URLs.
+**Correction to this spec's original design**, found while gathering context for the implementation
+plan: the original text of this decision assumed presigned MinIO URLs were an already-proven pattern
+in this codebase (extrapolating from the architecture doc's description of "presigned uploads").
+Checking the actual code found that's false — `upload_track` takes a normal multipart POST through
+the API; no presigned URL of any kind has ever been used anywhere in this project, and MinIO has no
+browser CORS policy configured for `localhost:3000`. FastAPI, by contrast, already has working,
+tested CORS for exactly that origin (`services/api/app/main.py`, added in M4b). Standing up new,
+unverified MinIO CORS configuration for this milestone would be a real, unnecessary risk when a
+lower-risk path — reusing infrastructure this project has already proven — is available. Confirmed
+with the project owner before locking this in.
+
+**Revised decision:** a new endpoint, `GET /tracks/{track_id}/stems/{stem_type}`, gated by the same
+tenant-ownership check every other endpoint performs (404 before any storage call), restricted to
+`stem_type in ("drums", "bass", "other")` (a 404 for `vocals` or any other value — M6a doesn't serve
+vocals, per Decision 1), returns the raw audio bytes directly (`Response(content=data,
+media_type="audio/wav")`, reusing `fetch_track_file()`'s existing full-bytes-in-memory pattern rather
+than introducing a new streaming convention this codebase doesn't otherwise use). `GET /package`'s
+response no longer mints or returns presigned URLs; instead it returns same-origin API paths the
+browser can `fetch()` directly (already covered by the existing `CORSMiddleware` config), e.g.
+`{"drums": "/tracks/{id}/stems/drums", ...}`. `CLAUDE.md`'s "never log raw audio... or signed URLs"
+rule is satisfied more simply this way — there's no signed URL to accidentally log in the first
+place, since the audio route requires the same per-request auth headers as every other endpoint
+rather than embedding a bearer-token-like signature in the URL itself.
 
 ## Decision 5: frontend — `/tracks/[id]/play`, generate-on-demand, split-view layout
 
@@ -131,20 +150,27 @@ New Next.js page, following M4b's established `apps/web` conventions exactly (de
 page) and `/tracks/[id]` (the correction editor page), so a track's package/player is reachable from
 wherever the user already is.
 
-Three states, checked in this order (mirroring the correction editor's own 404-then-degrade pattern):
+Two states, checked in this order (mirroring the correction editor's own 404-then-degrade pattern):
 
 1. **No package yet** (`GET /package` returned 404): show a "Generate karaoke package" button. Click
    → `POST /tracks/{id}/package` (already exists from M5) → on success, re-fetch `GET /package` and
-   move to state 3. No polling loop needed since the POST call itself blocks until packaging
+   move to state 2. No polling loop needed since the POST call itself blocks until packaging
    completes or errors (same synchronous request/response shape as `/separate`, `/transcribe`,
    `/realign` already use).
-2. **Lyrics withheld or non-English** (visible once the package loads, from the same signal M4b's
-   editor already surfaces): the player still plays audio and shows the pitch lane, but the lyrics
-   strip shows the same "lyrics not available" / "non-English, editing disabled" banner styling M4b
-   established, reusing rather than reinventing that UI.
-3. **Ready**: the actual player — layout per the approved split-view mockup (lyrics strip on top,
+2. **Ready**: the actual player — layout per the approved split-view mockup (lyrics strip on top,
    pitch-lane graph below, roughly equal visual weight). Playback controls: play/pause and a seek
-   bar are the only controls in M6a (no mixer, no transposition — those are M6b).
+   bar are the only controls in M6a (no mixer, no transposition — those are M6b). If every word's
+   `text` is `null` (the lyrics-withheld case — directly readable from the fetched document itself,
+   no second API call needed), the lyrics strip shows a brief "lyrics not available for this track"
+   note instead of blank text, but everything else (audio, pitch lane, playback) works identically.
+
+**Correction to this spec's original design**, found while gathering context for the implementation
+plan: the original text described a third state, "non-English," reusing M4b's correction-editor
+banner. That doesn't apply here — `language` is a `Transcription` field, never copied onto
+`KaraokePackage`/`karaoke.json`, and nothing in the player's feature set (playback, word highlight,
+pitch lane) depends on it; English-only was specifically a restriction on M4b's *text-editing* UI,
+not on playback. Adding a second `GET /transcription` call solely to power a banner that gates
+nothing here would be unjustified scope. Dropped.
 
 **Sync mechanism:** on play, all three `AudioBufferSourceNode`s start at the same
 `audioContext.currentTime + small offset` (so `start()` calls landing in the same JS tick stay
@@ -158,8 +184,9 @@ sample-aligned at the new position.
 ## What M6a builds
 
 1. `services/api/app/karaoke_schema.py` — `KARAOKE_SCHEMA_V1` (JSON Schema dict, Draft 2020-12).
-2. `GET /tracks/{track_id}/package` on `services/api/app/routes/tracks.py` — assembly, validation,
-   presigned URL minting, per Decisions 2-4.
+2. `GET /tracks/{track_id}/package` and `GET /tracks/{track_id}/stems/{stem_type}` on
+   `services/api/app/routes/tracks.py` — assembly, validation, and stem-audio proxying, per
+   Decisions 2-4.
 3. `apps/web/app/tracks/[id]/play/page.tsx` — the player page, three states, per Decision 5.
 4. `apps/web/lib/api.ts` additions: `getPackage()`, `generatePackage()` (thin wrappers matching the
    file's existing `getTranscription()`/`realignTrack()` pattern), plus new TS interfaces mirroring
@@ -183,10 +210,12 @@ skipped silently.
 - Happy path: real `POST /package` first (using the existing real-pipeline test infra from M5's
   `test_tracks_package.py`), then `GET /package` returns 200 with a document that validates against
   `KARAOKE_SCHEMA_V1` (asserted directly in the test, not just trusted from the endpoint), plus three
-  `stem_urls` keys.
+  `stem_urls` keys; a follow-up `GET` on one of those paths returns 200 audio bytes.
 - 404 when track doesn't exist / wrong tenant (existing pattern).
-- 404 when no `KaraokePackage` row exists yet, with a "must not mint presigned URLs" non-invocation
-  guard (same monkeypatch-raises-if-called pattern used throughout this project).
+- 404 when no `KaraokePackage` row exists yet, with a non-invocation guard on the stem-lookup/serving
+  code path (same monkeypatch-raises-if-called pattern used throughout this project).
+- `GET /stems/{stem_type}` rejects `vocals` and any unrecognized stem type with 404 (M6a never serves
+  vocals — Decision 1).
 - Lyrics-withheld case: `words[*].text` are `null` in the assembled document too (this is the same
   invariant M5's Task 3 fix round added test coverage for at the DB layer — this test confirms it
   survives the read-time assembly step as well, since a careless assembly function could
