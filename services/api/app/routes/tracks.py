@@ -8,7 +8,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+import jsonschema
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -19,6 +20,7 @@ from app.db import get_db
 from app.fingerprint import FingerprintError, fingerprint_audio
 from app.gate import resolve_lane_outcome, resolve_lyrics_display_allowed
 from app.gpu_backend import BackendBusyError, BackendTimeoutError, run_inference
+from app.karaoke_schema import KARAOKE_SCHEMA_V1
 from app.models import (
     FingerprintMatch,
     KaraokePackage,
@@ -29,6 +31,7 @@ from app.models import (
     Transcription,
 )
 from app.packaging import (
+    CREPE_HOP_MS,
     AccompanimentError,
     PitchExtractionError,
     StructureExtractionError,
@@ -68,6 +71,9 @@ TRANSCRIPTION_TIMEOUT_SECONDS = 1800
 
 ALLOWED_PITCH_MODELS = ("tiny", "full")
 DEFAULT_PITCH_MODEL = "tiny"
+
+# The player (M6a) only ever plays the instrumental -- vocals are never served for playback.
+ALLOWED_PLAYBACK_STEM_TYPES = ("drums", "bass", "other")
 
 # The karaoke_packages schema version this endpoint writes for every row -- CLAUDE.md: "karaoke.json
 # is a versioned schema. Any shape change needs a migration path, not a silent bump." A named
@@ -871,3 +877,144 @@ def package_track(
         beats_ms=package.beats_ms,
         sections_ms=package.sections_ms,
     )
+
+
+class PitchFrameOut(BaseModel):
+    time_ms: int
+    hz: float | None
+    confidence: float
+
+
+class PitchInfo(BaseModel):
+    model: str
+    hop_ms: int
+    frames: list[PitchFrameOut]
+
+
+class KaraokeDocument(BaseModel):
+    schema_version: int
+    track_id: uuid.UUID
+    words: list[WordInfo]
+    pitch: PitchInfo
+    tempo_bpm: float
+    beats_ms: list[int]
+    sections_ms: list[int]
+
+
+class StemUrls(BaseModel):
+    drums: str
+    bass: str
+    other: str
+
+
+class PackageGetResponse(BaseModel):
+    karaoke: KaraokeDocument
+    stem_urls: StemUrls
+
+
+def _assemble_karaoke_document(package: KaraokePackage) -> dict[str, object]:
+    # hop_ms is packaging.py's CREPE_HOP_MS constant, not stored per-row -- if hop length ever
+    # becomes configurable per package, that's a real schema/migration change (CLAUDE.md), not
+    # something to smuggle in here.
+    return {
+        "schema_version": package.schema_version,
+        "track_id": str(package.track_id),
+        "words": package.words,
+        "pitch": {
+            "model": package.pitch_model,
+            "hop_ms": CREPE_HOP_MS,
+            "frames": package.pitch,
+        },
+        "tempo_bpm": package.tempo_bpm,
+        "beats_ms": package.beats_ms,
+        "sections_ms": package.sections_ms,
+    }
+
+
+@router.get("/tracks/{track_id}/package", response_model=PackageGetResponse)
+def get_package(
+    track_id: uuid.UUID,
+    identity: Identity = Depends(get_identity),
+    db: Session = Depends(get_db),
+) -> PackageGetResponse:
+    track = db.get(Track, track_id)
+    if track is None or track.tenant_id != identity.tenant_id:
+        raise HTTPException(status_code=404, detail="track not found")
+
+    package = db.execute(
+        select(KaraokePackage)
+        .where(KaraokePackage.track_id == track.id)
+        .order_by(KaraokePackage.created_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if package is None:
+        raise HTTPException(status_code=404, detail="no karaoke package found for this track")
+
+    document = _assemble_karaoke_document(package)
+    try:
+        jsonschema.validate(instance=document, schema=KARAOKE_SCHEMA_V1)
+    except jsonschema.exceptions.ValidationError as exc:
+        # A validation failure here means the assembled document doesn't match its own declared
+        # schema -- a genuine internal bug, never a client-input problem. The generic detail
+        # string is deliberate: the ValidationError's own message can echo a fragment of the
+        # instance data (which may include word/lyric content), and CLAUDE.md forbids logging or
+        # returning raw lyrics.
+        raise HTTPException(
+            status_code=500, detail="assembled karaoke document failed validation"
+        ) from exc
+
+    stem_rows = (
+        db.execute(
+            select(Stem).where(
+                Stem.track_id == track.id, Stem.stem_type.in_(ALLOWED_PLAYBACK_STEM_TYPES)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    stems_by_type: dict[str, Stem] = {}
+    for stem in stem_rows:
+        stems_by_type.setdefault(stem.stem_type, stem)
+    missing = set(ALLOWED_PLAYBACK_STEM_TYPES) - set(stems_by_type)
+    if missing:
+        # Shouldn't happen if a KaraokePackage row exists (packaging itself required all four
+        # stems) -- but not impossible if a stem was deleted out-of-band. Fail closed rather than
+        # silently return a response with fewer than three stem URLs.
+        raise HTTPException(status_code=500, detail="package exists but stems are missing")
+
+    stem_urls = {
+        stem_type: f"/tracks/{track_id}/stems/{stem_type}"
+        for stem_type in ALLOWED_PLAYBACK_STEM_TYPES
+    }
+
+    return PackageGetResponse(
+        karaoke=KaraokeDocument.model_validate(document),
+        stem_urls=StemUrls(**stem_urls),
+    )
+
+
+@router.get("/tracks/{track_id}/stems/{stem_type}")
+def get_stem(
+    track_id: uuid.UUID,
+    stem_type: str,
+    identity: Identity = Depends(get_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    if stem_type not in ALLOWED_PLAYBACK_STEM_TYPES:
+        raise HTTPException(status_code=404, detail="stem not found")
+
+    track = db.get(Track, track_id)
+    if track is None or track.tenant_id != identity.tenant_id:
+        raise HTTPException(status_code=404, detail="track not found")
+
+    stem = db.execute(
+        select(Stem)
+        .where(Stem.track_id == track.id, Stem.stem_type == stem_type)
+        .limit(1)
+    ).scalar_one_or_none()
+    if stem is None:
+        raise HTTPException(status_code=404, detail="stem not found")
+
+    minio_client = get_minio_client()
+    data = fetch_track_file(minio_client, stem.storage_key)
+    return Response(content=data, media_type="audio/wav")
