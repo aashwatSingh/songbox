@@ -51,20 +51,31 @@ export function findActivePitchFrameIndex(
   return result;
 }
 
+import { SoundTouchNode } from "@soundtouchjs/audio-worklet";
+
+const SOUNDTOUCH_PROCESSOR_URL = "/soundtouch-processor.js";
+
+// Fixed iteration/indexing order for the three stems -- used both when constructing fresh
+// source/gain nodes in play() and when looking up which gain node a mixer change should apply to.
+const STEM_ORDER: (keyof StemBuffers)[] = ["drums", "bass", "other"];
+
 export interface StemBuffers {
   drums: AudioBuffer;
   bass: AudioBuffer;
   other: AudioBuffer;
 }
 
-// Plays three stems sample-aligned via the Web Audio API, summed through independent GainNodes
-// (left at gain=1 in M6a -- M6b's mixer milestone will expose these as user controls without
-// needing to touch this class's playback logic).
+// Plays three stems sample-aligned via the Web Audio API, mixed through independent GainNodes
+// (per-stem volume/mute, M6b) into a single shared SoundTouchNode (key/tempo transposition, M6b)
+// before reaching the destination. Transposition shifts the whole mix uniformly -- one shared
+// node, not one per stem, since shifting each stem's pitch independently would be musically
+// meaningless.
 export class StemPlayer {
   private context: AudioContext;
   private buffers: StemBuffers;
   private sources: AudioBufferSourceNode[] = [];
   private gains: GainNode[] = [];
+  private soundTouchNode: SoundTouchNode | null = null;
   private startedAtContextTime = 0;
   private startedAtOffsetSeconds = 0;
   private playing = false;
@@ -75,29 +86,57 @@ export class StemPlayer {
   private playToken = 0;
   private onEnded: (() => void) | null;
 
+  // Persistent mixer/transpose state -- deliberately independent of any particular GainNode/
+  // SoundTouchNode instance, since play() recreates sources and gains on every call (including
+  // every seek and pause/resume). Without this, a mixer setting would silently reset the moment
+  // the user touches the seek bar -- not a hypothetical, the normal expected user flow.
+  private stemVolumes: Record<keyof StemBuffers, number> = { drums: 1, bass: 1, other: 1 };
+  private stemMuted: Record<keyof StemBuffers, boolean> = {
+    drums: false,
+    bass: false,
+    other: false,
+  };
+  private tempoMultiplier = 1;
+  private pitchSemitones = 0;
+
   constructor(context: AudioContext, buffers: StemBuffers, onEnded?: () => void) {
     this.context = context;
     this.buffers = buffers;
     this.onEnded = onEnded ?? null;
   }
 
+  // Must be called once, awaited, before the first play() call -- registers the SoundTouch
+  // worklet module and constructs the single shared SoundTouchNode every stem mixes into.
+  // Mirrors PitchTracker.init()'s established pattern from M6c (lib/micScoring.ts) for "async
+  // worklet setup that must happen once after construction, before the class is otherwise used."
+  async init(): Promise<void> {
+    await SoundTouchNode.register(this.context, SOUNDTOUCH_PROCESSOR_URL);
+    this.soundTouchNode = new SoundTouchNode({ context: this.context });
+    this.soundTouchNode.connect(this.context.destination);
+  }
+
   play(offsetSeconds = 0): void {
+    if (!this.soundTouchNode) {
+      throw new Error("StemPlayer.init() must be called and awaited before play()");
+    }
     this.stopSources();
     const token = this.playToken;
-    const stems: (keyof StemBuffers)[] = ["drums", "bass", "other"];
     this.sources = [];
     this.gains = [];
-    for (const stem of stems) {
+    for (const stem of STEM_ORDER) {
       const source = this.context.createBufferSource();
       source.buffer = this.buffers[stem];
+      source.playbackRate.value = this.tempoMultiplier;
       const gain = this.context.createGain();
-      gain.gain.value = 1;
-      source.connect(gain).connect(this.context.destination);
+      gain.gain.value = this.stemMuted[stem] ? 0 : this.stemVolumes[stem];
+      source.connect(gain).connect(this.soundTouchNode);
       source.onended = () => this.handleSourceEnded(token);
       source.start(0, offsetSeconds);
       this.sources.push(source);
       this.gains.push(gain);
     }
+    this.soundTouchNode.playbackRate.value = this.tempoMultiplier;
+    this.soundTouchNode.pitchSemitones.value = this.pitchSemitones;
     this.startedAtContextTime = this.context.currentTime;
     this.startedAtOffsetSeconds = offsetSeconds;
     this.playing = true;
@@ -117,11 +156,52 @@ export class StemPlayer {
     }
   }
 
+  setStemVolume(stem: keyof StemBuffers, value: number): void {
+    this.stemVolumes[stem] = value;
+    this.applyGain(stem);
+  }
+
+  setStemMuted(stem: keyof StemBuffers, muted: boolean): void {
+    this.stemMuted[stem] = muted;
+    this.applyGain(stem);
+  }
+
+  // Live tempo change -- re-anchors the position-tracking bookkeeping (the same mechanism seek()
+  // already uses internally) so currentTimeSeconds stays correct across the change. No stop/
+  // restart of the underlying source nodes is needed: playbackRate is a live-adjustable
+  // AudioParam on an already-running node.
+  setTempo(multiplier: number): void {
+    if (this.playing) {
+      const currentPosition = this.currentTimeSeconds;
+      this.tempoMultiplier = multiplier;
+      this.startedAtOffsetSeconds = currentPosition;
+      this.startedAtContextTime = this.context.currentTime;
+      for (const source of this.sources) {
+        source.playbackRate.value = multiplier;
+      }
+      if (this.soundTouchNode) {
+        this.soundTouchNode.playbackRate.value = multiplier;
+      }
+    } else {
+      this.tempoMultiplier = multiplier;
+    }
+  }
+
+  setPitchSemitones(semitones: number): void {
+    this.pitchSemitones = semitones;
+    if (this.soundTouchNode) {
+      this.soundTouchNode.pitchSemitones.value = semitones;
+    }
+  }
+
   get currentTimeSeconds(): number {
     if (!this.playing) {
       return this.startedAtOffsetSeconds;
     }
-    return this.startedAtOffsetSeconds + (this.context.currentTime - this.startedAtContextTime);
+    return (
+      this.startedAtOffsetSeconds +
+      (this.context.currentTime - this.startedAtContextTime) * this.tempoMultiplier
+    );
   }
 
   get isPlaying(): boolean {
@@ -142,6 +222,14 @@ export class StemPlayer {
     // to land.
     this.startedAtOffsetSeconds = 0;
     this.onEnded?.();
+  }
+
+  private applyGain(stem: keyof StemBuffers): void {
+    const index = STEM_ORDER.indexOf(stem);
+    const gain = this.gains[index];
+    if (gain) {
+      gain.gain.value = this.stemMuted[stem] ? 0 : this.stemVolumes[stem];
+    }
   }
 
   private stopSources(): void {
