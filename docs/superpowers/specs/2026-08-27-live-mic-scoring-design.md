@@ -89,14 +89,27 @@ formula (no basis exists yet to justify weighting one note or phrase over anothe
 
 ## Decision 4: UI — extends the existing player page, doesn't replace it
 
-An "Enable mic scoring" toggle added to `/tracks/{id}/play` (M6a's existing page). Clicking it:
-requests mic permission → runs the ~4s calibration (accompaniment plays, UI shows "stay quiet —
-calibrating..." ) → then behaves exactly like the existing player, except the live pitch trace
-renders as a second polyline on the same pitch-lane SVG M6a already draws (a visually distinct
-color from the stored target trace), and a running "X% on pitch" score displays alongside the
-existing playback controls. If the user denies mic permission, or their browser doesn't support
-`AudioWorklet` at all, the page falls back to exactly M6a's existing playback-only experience — no
-error state, no dead-end UI, since mic scoring is additive, not required to use the player.
+An "Enable mic scoring" toggle added to `/tracks/{id}/play` (M6a's existing page). Clicking it
+requests mic permission, then **starts playback immediately** (from the current position) rather
+than a separate play-pause-then-play sequence: the first ~4 seconds of that playback session *are*
+the calibration window (UI shows "stay quiet — calibrating..."), after which scoring activates and
+listening continues uninterrupted — one continuous action, not three.
+
+**Correction to this spec's original design**, found while writing the implementation plan: the
+live pitch reading renders as a single moving **marker** (a small dot at the current instant),
+not a second historical polyline. A live polyline would need a growing/sliding buffer of recent
+(time, hz) points recomputed into a new points-string on every animation frame — exactly the
+per-frame full-array-rebuild performance pattern M6a's own final review just found and fixed for
+the *static* target polyline (which only needs to be memoized once, since it doesn't change
+during playback). A live trace has no such fixed point to memoize against; a single marker avoids
+reintroducing that cost class entirely, updates via plain `cx`/`cy` attribute changes (cheap), and
+is still immediately legible — the user sees their current pitch dot relative to the stored target
+line in real time, the same feedback a physical tuner or pitch app gives.
+
+A running "X% on pitch" score displays alongside the existing playback controls. If the user
+denies mic permission, or `AudioWorklet` init fails for any reason, the page falls back to exactly
+M6a's existing playback-only experience — no error state blocking playback, no dead-end UI, since
+mic scoring is additive, not required to use the player.
 
 ## What M6c builds
 
