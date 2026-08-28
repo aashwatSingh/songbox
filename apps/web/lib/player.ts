@@ -51,7 +51,9 @@ export function findActivePitchFrameIndex(
   return result;
 }
 
-import { SoundTouchNode } from "@soundtouchjs/audio-worklet";
+// Type-only import: erased at compile time, produces zero runtime require/import call. The
+// runtime import is deferred into init() below -- see the comment there for why.
+import type { SoundTouchNode } from "@soundtouchjs/audio-worklet";
 
 const SOUNDTOUCH_PROCESSOR_URL = "/soundtouch-processor.js";
 
@@ -109,7 +111,17 @@ export class StemPlayer {
   // worklet module and constructs the single shared SoundTouchNode every stem mixes into.
   // Mirrors PitchTracker.init()'s established pattern from M6c (lib/micScoring.ts) for "async
   // worklet setup that must happen once after construction, before the class is otherwise used."
+  //
+  // The @soundtouchjs/audio-worklet import is dynamic (not a top-level static import) because its
+  // module declares `class SoundTouchNode extends AudioWorkletNode` at module scope -- evaluating
+  // that class declaration requires evaluating `AudioWorkletNode` immediately, and
+  // AudioWorkletNode is a browser-only Web Audio API global that doesn't exist in Node.js. A
+  // top-level static import would drag that evaluation into Next.js's server-side render of any
+  // page that imports this module (even just for its types/helpers), crashing every direct/hard
+  // navigation with a 500. init() only ever runs client-side, after user interaction, so deferring
+  // the import here keeps the module evaluation out of SSR entirely.
   async init(): Promise<void> {
+    const { SoundTouchNode } = await import("@soundtouchjs/audio-worklet");
     await SoundTouchNode.register(this.context, SOUNDTOUCH_PROCESSOR_URL);
     this.soundTouchNode = new SoundTouchNode({ context: this.context });
     this.soundTouchNode.connect(this.context.destination);
