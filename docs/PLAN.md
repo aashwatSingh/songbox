@@ -115,10 +115,14 @@ Each ends with working, tested, committed code and an updated `STATUS.md`.
     `/tracks/{id}/play` page: Web Audio playback of the three non-vocal stems sample-aligned via
     `StemPlayer`, word-highlight lyrics, and an SVG pitch-lane visualization with a moving
     playhead.
-  - **M6b — Stem mixer + transposition (not started).** Independent per-stem volume/mute controls
-    (the `GainNode`s M6a's `StemPlayer` already creates, currently fixed at gain=1, are built to
-    take real control input without needing rework), plus key/tempo shifting — the
-    SoundTouch/Rubber Band-to-WASM R&D item the risk note below originally flagged.
+  - **M6b — Stem mixer + transposition (done, see `docs/STATUS.md`).** Independent per-stem
+    volume/mute controls on the `GainNode`s M6a's `StemPlayer` already creates, plus key/tempo
+    shifting via `@soundtouchjs/audio-worklet`'s `SoundTouchNode` (the SoundTouch/Rubber
+    Band-to-WASM R&D item the risk note below originally flagged) — mixer and transpose state
+    persists across `play()`'s existing recreate-nodes-on-every-seek pattern, and tempo changes
+    re-anchor `currentTimeSeconds` so word highlighting, the pitch-lane playhead, and M6c's mic-
+    scoring target lookup all stay correctly synced regardless of tempo. Wired into the
+    `/tracks/{id}/play` page via new Mixer and Transpose UI panels.
   - **M6c — Live mic pitch scoring + calibration (done, see `docs/STATUS.md`).** YIN pitch
     detection in an `AudioWorkletProcessor` (`apps/web/public/pitch-worklet.js`), wired into the
     `/tracks/{id}/play` page via `apps/web/lib/micScoring.ts`: a per-session bleed calibration

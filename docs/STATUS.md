@@ -1,6 +1,112 @@
 # Status
 
-Last updated: 2026-08-27.
+Last updated: 2026-08-28.
+
+## Done — M6b complete
+
+M6b's scope (the stem mixer and key/tempo transposition, the last of the three M6 sub-milestones)
+is built and verified end to end, across two tasks:
+
+What was built:
+- **`apps/web/lib/player.ts`'s `StemPlayer` extension** (Task 1) — real per-stem volume/mute
+  control (`setStemVolume`, `setStemMuted`) on the `GainNode`s M6a's player already created, and
+  independent key/tempo transposition via `@soundtouchjs/audio-worklet`'s `SoundTouchNode`
+  (`init()`, awaited once before the first `play()`; `setTempo(multiplier)` mirrors the multiplier
+  onto both each source's `playbackRate` and the shared `SoundTouchNode`'s `playbackRate`;
+  `setPitchSemitones(semitones)` sets `SoundTouchNode.pitchSemitones` independently of tempo). The
+  real fix in this task: mixer/transpose state (`stemVolumes`, `stemMuted`, `tempoMultiplier`,
+  `pitchSemitones`) now lives on the `StemPlayer` instance itself, independent of any particular
+  `GainNode`/`SoundTouchNode`, and `play()` reads it instead of hardcoding gain=1/tempo=1/pitch=0 —
+  without this, any mixer or transpose setting would have silently reset the moment the user
+  touched the seek bar, since `play()` recreates every source/gain node on every seek (the same
+  pattern M6a's `StemPlayer` already had). `setTempo()` also re-anchors the position-tracking
+  bookkeeping (`startedAtOffsetSeconds`/`startedAtContextTime`) so `currentTimeSeconds` stays
+  continuous across a live tempo change, the same mechanism `seek()` already used internally.
+- **`apps/web/app/tracks/[id]/play/page.tsx` integration** (Task 2) — a Mixer panel (per-stem
+  volume slider + mute button for drums/bass/other) and a Transpose panel (Key slider, -6 to +6
+  semitones; Tempo slider, 75% to 125%) added below the existing mic-scoring controls, wired to
+  the four new `StemPlayer` methods via `handleStemVolumeChange`/`handleStemMuteToggle`/
+  `handleTempoChange`/`handlePitchChange`. `ensurePlayerLoaded` now awaits `player.init()` right
+  after construction and seeds the freshly-created player with whatever mixer/transpose values the
+  user already touched via the UI before ever clicking Play — otherwise those settings would exist
+  only in React state with nothing to apply them to until the next render.
+
+`npx tsc --noEmit` clean in `apps/web`.
+
+Live-browser-verified against real running servers (a real generated 8-second test package, since
+this track's synthetic stems have no lyric words — `words: []` — but do have a full-length pitch
+contour, sufficient to exercise the pitch-lane playhead/tick() chain even without word-highlight
+text to look at):
+- Ordinary playback (play/pause/seek), the pitch-lane playhead, and the mic-scoring toggle all
+  unregressed: enabling mic scoring hit the same `getUserMedia` permission gate as every prior
+  verification pass in this sandboxed browser environment (mic access is blocked in the Browser
+  pane's automated tooling), exercising the established fallback path — `micError` renders
+  "Permission denied", the mic flow resets to idle, and the Mixer/Transpose panels remained fully
+  functional and untouched by the failed mic flow. Tempo changes were **not** exercised
+  simultaneously with mic scoring active, since mic access could not be granted in this
+  environment at all — the same limitation M6c's own verification recorded.
+- The Mixer and Transpose panels render below the existing controls, both in their default state
+  and reflecting live changes (screenshot-confirmed: a lowered Drums slider, a red "Muted" Bass
+  button, Key at "+6", Tempo at "110%").
+- **The tempo-sync check** (the property `setTempo()`'s re-anchoring logic exists to guarantee,
+  exercised here for the first time through the page's real `tick()`/RAF loop reading
+  `player.currentTimeSeconds`, not just Task 1's direct `StemPlayer` console script): a
+  high-frequency in-page sampling script (bypassing MCP round-trip latency, which is far too
+  coarse for an 8-second track) measured the seek bar's displayed position against
+  `performance.now()` across a tempo change from 100% to 75% and then to 125%, mid-playback.
+  Measured results: at 100% tempo, position advanced 0.6s over 602ms real time (0.997x); at 75%,
+  0.3s over 401ms (0.748x) then 0.3s over 401ms again (0.748x); at 125%, 0.5s over 400ms (1.250x)
+  then 0.5s over 404ms (1.238x) — matching each set tempo almost exactly. Critically, position was
+  identical in samples taken immediately before and immediately after each tempo change (e.g.
+  0.9s both 2ms apart around the 75% change; 1.5s both 2ms apart around the 125% change) —
+  confirming no discontinuity/jump at the moment of change. A second run confirmed mixer settings
+  (drums volume 0.3, bass muted) and transpose settings (tempo 110%, key +3) set **before the
+  first Play click** were correctly seeded into the freshly-constructed player (`ensurePlayerLoaded`
+  Step 1) — the button transitioned from "Play" to "Pause" and position began advancing with zero
+  console errors — and that the same drums/bass/tempo/key settings were still in effect,
+  unchanged, immediately after seeking to a new position (the exact regression Task 1's persistent-
+  state design targets, now confirmed at the UI-wiring level, not just via Task 1's direct
+  `StemPlayer` test). The Key slider was also confirmed to change independently of Tempo (dragging
+  Key from -4 to +6 left the Tempo value unchanged at 110 throughout).
+- **Subjective audio quality was not evaluated by ear** — this is a headless/automated browser
+  environment with no real audio output to listen to, so "audibly different" claims are not made
+  here at all; verification relies entirely on the precise timing measurements above and the
+  absence of runtime/console errors, per `CLAUDE.md`'s measurement-discipline rule against writing
+  a plausible-looking but unmeasured claim.
+
+**A pre-existing bug was found during this live verification, not introduced by either of this
+milestone's two tasks and out of Task 2's stated file scope (`apps/web/lib/player.ts` was
+explicitly not to be touched) to fix here, but real and worth recording plainly:** every direct
+navigation to `/tracks/{id}/play` — a hard reload, a typed URL, a bookmark, a shared link, i.e.
+anything that isn't a client-side `<Link>` transition from an already-loaded page in the same
+app — returns an **HTTP 500** from the Next.js server. Root cause: `@soundtouchjs/audio-worklet`
+defines `class SoundTouchNode extends AudioWorkletNode` at module top level, and
+`apps/web/lib/player.ts`'s top-level `import { SoundTouchNode } from "@soundtouchjs/audio-worklet"`
+(added in this milestone's Task 1) pulls that class declaration — which evaluates its `extends`
+expression immediately, even without ever instantiating the class — into the module graph
+`page.tsx` imports. Next.js still evaluates a `"use client"` page's module graph on the server for
+the initial HTML render, and `AudioWorkletNode` doesn't exist in that server (Node.js) environment,
+so the import throws `ReferenceError: AudioWorkletNode is not defined` during that render. **Verified
+in both dev (`next dev`) and a real production build** (`next build && next start`, a real GET
+against the built server) — this is not a dev-mode-only quirk. In this project's dev environment,
+Fast Refresh happens to recover the page purely client-side after the crash (the client bundle
+loads separately and `AudioWorkletNode` does exist in the browser), which is almost certainly why
+this went unnoticed through Task 1's own verification (a direct `StemPlayer` console script,
+never a rendered page) and this milestone's own client-side-navigation-based testing above — but
+the raw HTTP response for any hard/first visit is still a 500, and Fast Refresh is a dev-only
+safety net with no production equivalent. This needs a real fix (most likely: moving the
+`StemPlayer`/`SoundTouchNode`-dependent import behind a client-only dynamic import, e.g.
+`next/dynamic(..., { ssr: false })`, or guarding `@soundtouchjs/audio-worklet`'s import behind a
+`typeof window !== "undefined"` check) as tracked follow-up work, not silently absorbed into this
+entry as if it were resolved.
+
+Deliberately out of scope, matching the design spec's own scope decisions:
+- **Persisting mixer/transpose settings** across page loads or sessions — both live only in this
+  page's React state for the current session, same as M6c's `ScoreTracker` percentage.
+- **Tuning the Tempo/Key slider ranges** (75-125%, -6 to +6 semitones) against real usability
+  feedback — both are the design spec's starting values, not measured/validated ones.
+- **A dedicated route or persistence layer for mixer presets** — no new route was added; this
+  milestone only extends the existing `/tracks/{id}/play` page.
 
 ## Done — M6c complete
 
@@ -821,24 +927,38 @@ findings, all fixed:
 
 ## In flight
 
-- Nothing mid-work right now. M0, M1, M2, M3, M4a, M4b, M5, M6a, and M6c are all done. M4a's
-  measured aligned-English accuracy (68.2ms median, 37.2% within 50ms) does not meet
-  `docs/PLAN.md`'s ±50ms acceptance criterion — see M4a's entry below. That decision has been
-  made, not left pending: merge M4a as engineering-complete with the gap documented, tracked as
-  real follow-up work (`docs/PLAN.md` open question 5, commit `d3ff5ff`), not a merge blocker.
-  Real authentication remains a genuine, tracked gap across the whole project — `docs/PLAN.md`
-  open question 9. M6a closed the read-path sub-question of `docs/PLAN.md` open question 10 (the
-  `GET /tracks/{id}/package` read endpoint, `karaoke.json` v1 assembly, and schema validation now
-  exist). M6c built the live-mic-pitch-scoring mechanism (calibration, cents-based scoring against
-  M6a's contour) but left `docs/PLAN.md` open question 3 (real bleed survival) genuinely
-  unmeasured, pending a manual test pass with a real mic and speakers — `TODO: unmeasured`, not
-  closed. Only the stem-mixer/transposition part of the original M6 scope (M6b) remains not
-  started.
+- Nothing mid-work right now. M0, M1, M2, M3, M4a, M4b, M5, M6a, M6b, and M6c are all done — the
+  full M6 milestone (all three sub-milestones) is complete. M4a's measured aligned-English accuracy
+  (68.2ms median, 37.2% within 50ms) does not meet `docs/PLAN.md`'s ±50ms acceptance criterion —
+  see M4a's entry below. That decision has been made, not left pending: merge M4a as
+  engineering-complete with the gap documented, tracked as real follow-up work (`docs/PLAN.md`
+  open question 5, commit `d3ff5ff`), not a merge blocker. Real authentication remains a genuine,
+  tracked gap across the whole project — `docs/PLAN.md` open question 9. M6a closed the read-path
+  sub-question of `docs/PLAN.md` open question 10 (the `GET /tracks/{id}/package` read endpoint,
+  `karaoke.json` v1 assembly, and schema validation now exist). M6c built the
+  live-mic-pitch-scoring mechanism (calibration, cents-based scoring against M6a's contour) but
+  left `docs/PLAN.md` open question 3 (real bleed survival) genuinely unmeasured, pending a manual
+  test pass with a real mic and speakers — `TODO: unmeasured`, not closed. M6b built the stem mixer
+  and key/tempo transposition, closing the original M6 scope entirely.
 
 ## Blocked
 
 - **No GitHub remote configured yet**, so `.github/workflows/ci.yml` has only been reasoned about, not
-  actually run by GitHub Actions. Not blocking M4/M5/M6a work, only CI-on-push.
+  actually run by GitHub Actions. Not blocking M4/M5/M6 work, only CI-on-push.
+- **`/tracks/{id}/play` 500s on every direct/hard navigation** (typed URL, bookmark, shared link,
+  hard reload — anything that isn't a client-side `<Link>` transition from an already-loaded page).
+  Found during M6b's live verification, not introduced by M6b: `apps/web/lib/player.ts`'s M6b Task
+  1 addition of `import { SoundTouchNode } from "@soundtouchjs/audio-worklet"` pulls in a
+  `class SoundTouchNode extends AudioWorkletNode` declaration that throws
+  `ReferenceError: AudioWorkletNode is not defined` the moment the module is evaluated on the
+  server (Next.js still evaluates a `"use client"` page's module graph server-side for the initial
+  HTML render, and `AudioWorkletNode` doesn't exist in Node.js) — verified in both `next dev` and a
+  real `next build && next start`, not a dev-only quirk. See M6b's `docs/STATUS.md` entry above for
+  the full account and fix candidates (most likely a client-only dynamic import of the
+  `StemPlayer`/`SoundTouchNode`-dependent module). Blocks nothing already shipped — every verified
+  user flow in this project reaches the player page via a client-side `<Link>` from `/tracks`,
+  which doesn't hit this path — but is a real defect for any direct/bookmarked/shared link to a
+  player page, and should be fixed before this matters in production.
 
 ## Next three actions
 
@@ -863,9 +983,12 @@ findings, all fixed:
      a real processing overrun could glitch the music itself, not just corrupt a pitch reading —
      this has never been exercised against a genuine simultaneous mic-capture-plus-playback session
      in this sandboxed environment, only against playback alone or a denied-permission mic flow.
-2. Start M6b (stem mixer + transposition): independent volume/mute controls per stem, and
-   key/tempo shifting via SoundTouch/Rubber Band compiled to WASM per `docs/PLAN.md`'s risk note
-   on the original M6 estimate.
+2. Fix the `/tracks/{id}/play` SSR 500 recorded under Blocked above: give
+   `apps/web/lib/player.ts`'s `@soundtouchjs/audio-worklet` import (or the `StemPlayer` module as a
+   whole) a client-only boundary — e.g. `next/dynamic(..., { ssr: false })` around the page's
+   player-dependent tree, or a `typeof window !== "undefined"` guard — so a direct/hard navigation
+   to the player page no longer 500s before Fast Refresh (dev-only) or client hydration
+   (production) can paper over it.
 3. Close `docs/PLAN.md` open question 5 (the ±50ms accuracy gap): try a larger wav2vec2 variant,
    check whether the separated vocal stem's audio quality degrades alignment precision versus the
    original mix, or investigate a systematic bias in the frame-to-millisecond conversion. Real work,

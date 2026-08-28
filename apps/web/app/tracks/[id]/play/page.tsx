@@ -9,7 +9,12 @@ import {
   stemUrl,
   type PackageResponse,
 } from "@/lib/api";
-import { StemPlayer, findActiveWordIndex, findActivePitchFrameIndex } from "@/lib/player";
+import {
+  StemPlayer,
+  findActiveWordIndex,
+  findActivePitchFrameIndex,
+  type StemBuffers,
+} from "@/lib/player";
 import {
   BLEED_FLOOR_MARGIN_RMS,
   PitchTracker,
@@ -42,6 +47,7 @@ async function decodeStem(context: AudioContext, path: string): Promise<AudioBuf
 }
 
 const CALIBRATION_DURATION_MS = 4000;
+const STEM_ORDER: (keyof StemBuffers)[] = ["drums", "bass", "other"];
 
 export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
   const { id } = use(props.params);
@@ -91,6 +97,19 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
   // M6a's durationSecondsRef exists to avoid for handleTrackEnded). A ref, not React state, is
   // what tick() must read to know whether scoring is active right now.
   const micActiveRef = useRef(false);
+
+  const [stemVolumes, setStemVolumesState] = useState<Record<keyof StemBuffers, number>>({
+    drums: 1,
+    bass: 1,
+    other: 1,
+  });
+  const [stemMuted, setStemMutedState] = useState<Record<keyof StemBuffers, boolean>>({
+    drums: false,
+    bass: false,
+    other: false,
+  });
+  const [tempoPercent, setTempoPercent] = useState(100);
+  const [pitchSemitones, setPitchSemitonesState] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -171,6 +190,20 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
         ]);
         setDurationSeconds(Math.max(drums.duration, bass.duration, other.duration));
         const player = new StemPlayer(context, { drums, bass, other }, handleTrackEnded);
+        await player.init();
+        // Seed the freshly-created player with whatever mixer/transpose values the user already
+        // set via the UI before ever clicking Play -- otherwise those settings would exist only
+        // in React state with nothing to apply them to until the next render, silently doing
+        // nothing on this first play(). Safe to read current-render state here directly: unlike
+        // tick()'s recursive requestAnimationFrame(tick) closure (which stays pinned to whichever
+        // render scheduled it), ensurePlayerLoaded is invoked fresh from a user-initiated event
+        // handler every time, so it always sees the latest render's state.
+        for (const stem of STEM_ORDER) {
+          player.setStemVolume(stem, stemVolumes[stem]);
+          player.setStemMuted(stem, stemMuted[stem]);
+        }
+        player.setTempo(tempoPercent / 100);
+        player.setPitchSemitones(pitchSemitones);
         playerRef.current = player;
         return player;
       } finally {
@@ -328,6 +361,29 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
     const seconds = Number(e.target.value);
     playerRef.current?.seek(seconds);
     setCurrentTimeMs(seconds * 1000);
+  }
+
+  function handleStemVolumeChange(stem: keyof StemBuffers, value: number) {
+    setStemVolumesState((prev) => ({ ...prev, [stem]: value }));
+    playerRef.current?.setStemVolume(stem, value);
+  }
+
+  function handleStemMuteToggle(stem: keyof StemBuffers) {
+    setStemMutedState((prev) => {
+      const next = { ...prev, [stem]: !prev[stem] };
+      playerRef.current?.setStemMuted(stem, next[stem]);
+      return next;
+    });
+  }
+
+  function handleTempoChange(percent: number) {
+    setTempoPercent(percent);
+    playerRef.current?.setTempo(percent / 100);
+  }
+
+  function handlePitchChange(semitones: number) {
+    setPitchSemitonesState(semitones);
+    playerRef.current?.setPitchSemitones(semitones);
   }
 
   const activeWordIndex = useMemo(
@@ -522,6 +578,65 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
           </div>
         )}
         {micError && <p className="mt-2 text-red-600 text-sm">{micError}</p>}
+      </div>
+
+      <div className="mt-6 border-t border-zinc-200 pt-4">
+        <h2 className="text-sm font-semibold mb-2">Mixer</h2>
+        {STEM_ORDER.map((stem) => (
+          <div key={stem} className="flex items-center gap-3 mb-2">
+            <span className="w-16 text-sm capitalize">{stem}</span>
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.05}
+              value={stemVolumes[stem]}
+              onChange={(e) => handleStemVolumeChange(stem, Number(e.target.value))}
+              disabled={stemMuted[stem]}
+              className="flex-1"
+            />
+            <button
+              onClick={() => handleStemMuteToggle(stem)}
+              className={`rounded px-2 py-1 text-xs font-medium ${
+                stemMuted[stem] ? "bg-red-100 text-red-700" : "bg-zinc-100 text-zinc-600"
+              }`}
+            >
+              {stemMuted[stem] ? "Muted" : "Mute"}
+            </button>
+          </div>
+        ))}
+      </div>
+
+      <div className="mt-4 border-t border-zinc-200 pt-4">
+        <h2 className="text-sm font-semibold mb-2">Transpose</h2>
+        <div className="flex items-center gap-3 mb-2">
+          <span className="w-16 text-sm">Key</span>
+          <input
+            type="range"
+            min={-6}
+            max={6}
+            step={1}
+            value={pitchSemitones}
+            onChange={(e) => handlePitchChange(Number(e.target.value))}
+            className="flex-1"
+          />
+          <span className="w-12 text-sm text-right">
+            {pitchSemitones > 0 ? `+${pitchSemitones}` : pitchSemitones}
+          </span>
+        </div>
+        <div className="flex items-center gap-3">
+          <span className="w-16 text-sm">Tempo</span>
+          <input
+            type="range"
+            min={75}
+            max={125}
+            step={5}
+            value={tempoPercent}
+            onChange={(e) => handleTempoChange(Number(e.target.value))}
+            className="flex-1"
+          />
+          <span className="w-12 text-sm text-right">{tempoPercent}%</span>
+        </div>
       </div>
     </main>
   );
