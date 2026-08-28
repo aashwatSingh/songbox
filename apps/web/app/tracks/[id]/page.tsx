@@ -48,7 +48,12 @@ export default function TrackEditorPage(props: PageProps<"/tracks/[id]">) {
   if (error && transcription === null) {
     return (
       <main className="max-w-2xl mx-auto py-12 px-6">
-        <BackToTracksLink />
+        <div className="mb-4 flex items-center gap-4">
+          <BackToTracksLink />
+          <Link href={`/tracks/${id}/play`} className="text-sm font-medium text-blue-600 hover:underline">
+            Play &rarr;
+          </Link>
+        </div>
         <p className="text-red-600">Could not load transcription: {error}</p>
       </main>
     );
@@ -64,7 +69,12 @@ export default function TrackEditorPage(props: PageProps<"/tracks/[id]">) {
   if (!transcription.lyrics_display_allowed) {
     return (
       <main className="max-w-2xl mx-auto py-12 px-6">
-        <BackToTracksLink />
+        <div className="mb-4 flex items-center gap-4">
+          <BackToTracksLink />
+          <Link href={`/tracks/${id}/play`} className="text-sm font-medium text-blue-600 hover:underline">
+            Play &rarr;
+          </Link>
+        </div>
         <h1 className="text-2xl font-semibold mb-4">Track {id}</h1>
         <p className="rounded bg-zinc-100 p-4 text-zinc-700">
           Lyric display isn&apos;t permitted for this track, so there&apos;s nothing to correct.
@@ -76,7 +86,12 @@ export default function TrackEditorPage(props: PageProps<"/tracks/[id]">) {
   if (transcription.language !== "en") {
     return (
       <main className="max-w-2xl mx-auto py-12 px-6">
-        <BackToTracksLink />
+        <div className="mb-4 flex items-center gap-4">
+          <BackToTracksLink />
+          <Link href={`/tracks/${id}/play`} className="text-sm font-medium text-blue-600 hover:underline">
+            Play &rarr;
+          </Link>
+        </div>
         <h1 className="text-2xl font-semibold mb-4">Track {id}</h1>
         <p className="rounded bg-zinc-100 p-4 text-zinc-700">
           Correction editing is English-only right now (detected language:{" "}
@@ -98,7 +113,12 @@ export default function TrackEditorPage(props: PageProps<"/tracks/[id]">) {
 
   return (
     <main className="max-w-2xl mx-auto py-12 px-6">
-      <BackToTracksLink />
+      <div className="mb-4 flex items-center gap-4">
+        <BackToTracksLink />
+        <Link href={`/tracks/${id}/play`} className="text-sm font-medium text-blue-600 hover:underline">
+          Play &rarr;
+        </Link>
+      </div>
       <h1 className="text-2xl font-semibold mb-4">Track {id}</h1>
       <div className="flex flex-wrap gap-2 mb-6">
         {wordTexts.map((text, idx) => (

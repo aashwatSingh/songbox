@@ -23,6 +23,15 @@ function getDevIdentity(): { tenantId: string; userId: string } {
   return { tenantId, userId };
 }
 
+// Exposes the same X-Dev-Tenant-Id/X-Dev-User-Id pair apiFetch() sends, for the rare caller (the
+// stem audio fetch in the player page) that must hit the API directly with the browser's fetch()
+// instead of going through apiFetch() -- the backend's dev-auth-stub identity gate requires these
+// headers on every route, including /stems/{stem_type}.
+export function getDevIdentityHeaders(): Record<string, string> {
+  const { tenantId, userId } = getDevIdentity();
+  return { "X-Dev-Tenant-Id": tenantId, "X-Dev-User-Id": userId };
+}
+
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const { tenantId, userId } = getDevIdentity();
   const response = await fetch(`${API_BASE_URL}${path}`, {
@@ -81,4 +90,47 @@ export function realignTrack(trackId: string, text: string): Promise<Transcripti
     method: "POST",
     body: JSON.stringify({ text }),
   });
+}
+
+export interface PitchFrame {
+  time_ms: number;
+  hz: number | null;
+  confidence: number;
+}
+
+export interface KaraokeDocument {
+  schema_version: number;
+  track_id: string;
+  words: WordInfo[];
+  pitch: {
+    model: string;
+    hop_ms: number;
+    frames: PitchFrame[];
+  };
+  tempo_bpm: number;
+  beats_ms: number[];
+  sections_ms: number[];
+}
+
+export interface StemUrls {
+  drums: string;
+  bass: string;
+  other: string;
+}
+
+export interface PackageResponse {
+  karaoke: KaraokeDocument;
+  stem_urls: StemUrls;
+}
+
+export function getPackage(trackId: string): Promise<PackageResponse> {
+  return apiFetch<PackageResponse>(`/tracks/${trackId}/package`);
+}
+
+export function generatePackage(trackId: string): Promise<unknown> {
+  return apiFetch(`/tracks/${trackId}/package`, { method: "POST" });
+}
+
+export function stemUrl(path: string): string {
+  return `${API_BASE_URL}${path}`;
 }

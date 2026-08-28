@@ -47,12 +47,20 @@ export default function TracksPage() {
                 </p>
               </div>
               {track.has_transcription ? (
-                <Link
-                  href={`/tracks/${track.track_id}`}
-                  className="shrink-0 text-sm font-medium text-blue-600 hover:underline"
-                >
-                  Edit lyrics
-                </Link>
+                <div className="shrink-0 flex items-center gap-3">
+                  <Link
+                    href={`/tracks/${track.track_id}`}
+                    className="text-sm font-medium text-blue-600 hover:underline"
+                  >
+                    Edit lyrics
+                  </Link>
+                  <Link
+                    href={`/tracks/${track.track_id}/play`}
+                    className="text-sm font-medium text-blue-600 hover:underline"
+                  >
+                    Play
+                  </Link>
+                </div>
               ) : (
                 <span className="shrink-0 text-sm text-zinc-400">not transcribed yet</span>
               )}
