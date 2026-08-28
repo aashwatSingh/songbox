@@ -196,20 +196,36 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
     if (!pkg) return;
     setMicError(null);
     setMicState("requesting");
+    // Tracked locally (not just via pitchTrackerRef) so the catch block can still release the
+    // mic's tracks if a throw happens before a PitchTracker is even constructed -- e.g.
+    // ensurePlayerLoaded() failing, or the audio-context-not-ready check below.
+    let micStream: MediaStream | null = null;
     try {
-      const micStream = await requestMicStream();
+      micStream = await requestMicStream();
       const player = await ensurePlayerLoaded(pkg);
       const context = audioContextRef.current;
       if (!context) throw new Error("audio context not ready");
 
       const tracker = new PitchTracker(context, micStream);
-      await tracker.init();
+      // Assigned before init() (not after) so that if init() throws (e.g. the worklet module
+      // 404s or fails to parse), the catch block below can still reach this tracker and stop it
+      // -- which releases the mic's tracks via PitchTracker.stop(). Assigning only on success
+      // left the mic stream unreachable from the catch block on this and every earlier throw.
       pitchTrackerRef.current = tracker;
+      await tracker.init();
 
       setMicState("calibrating");
       player.play(0);
       setIsPlaying(true);
-      rafRef.current = requestAnimationFrame(tick);
+      // Don't start a second RAF chain if ordinary Play already has one running (rafRef.current
+      // is non-null exactly when a tick() chain is scheduled -- see handlePlayPause/
+      // handleTrackEnded, which are the only other places that set it, and both null it out
+      // whenever playback stops). player.play(0) above still restarts the shared StemPlayer from
+      // position 0 for calibration; the already-running tick() loop picks that up on its next
+      // frame since it always reads playerRef.current/pitchTrackerRef.current fresh.
+      if (rafRef.current === null) {
+        rafRef.current = requestAnimationFrame(tick);
+      }
 
       const floor = await measureBleedFloor(tracker, CALIBRATION_DURATION_MS);
       bleedFloorRef.current = floor + BLEED_FLOOR_MARGIN_RMS;
@@ -220,8 +236,15 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
       setMicError((err as Error).message);
       setMicState("idle");
       micActiveRef.current = false;
-      pitchTrackerRef.current?.stop();
-      pitchTrackerRef.current = null;
+      if (pitchTrackerRef.current) {
+        // Owns the mic stream at this point -- stop() releases its tracks too.
+        pitchTrackerRef.current.stop();
+        pitchTrackerRef.current = null;
+      } else {
+        // No tracker was ever constructed (threw before that point, or requestMicStream() itself
+        // threw and left micStream null) -- release the raw stream directly if we got one.
+        micStream?.getTracks().forEach((track) => track.stop());
+      }
     }
   }
 
