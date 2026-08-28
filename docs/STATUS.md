@@ -74,31 +74,35 @@ text to look at):
   absence of runtime/console errors, per `CLAUDE.md`'s measurement-discipline rule against writing
   a plausible-looking but unmeasured claim.
 
-**A pre-existing bug was found during this live verification, not introduced by either of this
-milestone's two tasks and out of Task 2's stated file scope (`apps/web/lib/player.ts` was
-explicitly not to be touched) to fix here, but real and worth recording plainly:** every direct
-navigation to `/tracks/{id}/play` — a hard reload, a typed URL, a bookmark, a shared link, i.e.
-anything that isn't a client-side `<Link>` transition from an already-loaded page in the same
-app — returns an **HTTP 500** from the Next.js server. Root cause: `@soundtouchjs/audio-worklet`
-defines `class SoundTouchNode extends AudioWorkletNode` at module top level, and
-`apps/web/lib/player.ts`'s top-level `import { SoundTouchNode } from "@soundtouchjs/audio-worklet"`
-(added in this milestone's Task 1) pulls that class declaration — which evaluates its `extends`
-expression immediately, even without ever instantiating the class — into the module graph
-`page.tsx` imports. Next.js still evaluates a `"use client"` page's module graph on the server for
-the initial HTML render, and `AudioWorkletNode` doesn't exist in that server (Node.js) environment,
-so the import throws `ReferenceError: AudioWorkletNode is not defined` during that render. **Verified
-in both dev (`next dev`) and a real production build** (`next build && next start`, a real GET
-against the built server) — this is not a dev-mode-only quirk. In this project's dev environment,
-Fast Refresh happens to recover the page purely client-side after the crash (the client bundle
-loads separately and `AudioWorkletNode` does exist in the browser), which is almost certainly why
-this went unnoticed through Task 1's own verification (a direct `StemPlayer` console script,
-never a rendered page) and this milestone's own client-side-navigation-based testing above — but
-the raw HTTP response for any hard/first visit is still a 500, and Fast Refresh is a dev-only
-safety net with no production equivalent. This needs a real fix (most likely: moving the
-`StemPlayer`/`SoundTouchNode`-dependent import behind a client-only dynamic import, e.g.
-`next/dynamic(..., { ssr: false })`, or guarding `@soundtouchjs/audio-worklet`'s import behind a
-`typeof window !== "undefined"` check) as tracked follow-up work, not silently absorbed into this
-entry as if it were resolved.
+**A real bug was found during this milestone's live verification, and fixed within the same
+milestone (not left as follow-up work):** every direct navigation to `/tracks/{id}/play` — a hard
+reload, a typed URL, a bookmark, a shared link, i.e. anything that isn't a client-side `<Link>`
+transition from an already-loaded page in the same app — returned an **HTTP 500** from the Next.js
+server. Root cause: `@soundtouchjs/audio-worklet` defines `class SoundTouchNode extends
+AudioWorkletNode` at module top level, and `apps/web/lib/player.ts`'s top-level `import {
+SoundTouchNode } from "@soundtouchjs/audio-worklet"` (added in this milestone's Task 1) pulled that
+class declaration — which evaluates its `extends` expression immediately, even without ever
+instantiating the class — into the module graph `page.tsx` imports. Next.js still evaluates a
+`"use client"` page's module graph on the server for the initial HTML render, and `AudioWorkletNode`
+doesn't exist in that server (Node.js) environment, so the import threw `ReferenceError:
+AudioWorkletNode is not defined` during that render. **Verified in both dev (`next dev`) and a real
+production build** (`next build && next start`, a real GET against the built server) — this was not
+a dev-mode-only quirk. In this project's dev environment, Fast Refresh happens to recover the page
+purely client-side after the crash (the client bundle loads separately and `AudioWorkletNode` does
+exist in the browser), which is almost certainly why this went unnoticed through Task 1's own
+verification (a direct `StemPlayer` console script, never a rendered page) and this milestone's own
+client-side-navigation-based testing above — but the raw HTTP response for any hard/first visit was
+still a 500, and Fast Refresh is a dev-only safety net with no production equivalent.
+
+**Fix**: `apps/web/lib/player.ts`'s top-level value `import { SoundTouchNode } from
+"@soundtouchjs/audio-worklet"` was replaced with a type-only `import type { SoundTouchNode } from
+"@soundtouchjs/audio-worklet"` (erased at compile time, cannot execute the package's module code)
+plus a dynamic `const { SoundTouchNode } = await import("@soundtouchjs/audio-worklet")` inside
+`StemPlayer.init()` — the one method that only ever runs client-side, after user interaction,
+never during SSR. Re-verified for real: a genuine `curl -i` against a real `next build && next
+start` production server on `/tracks/{id}/play` returned `200 OK` (was `500`); a fresh-tab hard
+browser navigation showed no error; the Mixer/Transpose feature itself was re-confirmed working
+after the fix (Play, Tempo change, Key change, zero console errors).
 
 Deliberately out of scope, matching the design spec's own scope decisions:
 - **Persisting mixer/transpose settings** across page loads or sessions — both live only in this
@@ -945,20 +949,6 @@ findings, all fixed:
 
 - **No GitHub remote configured yet**, so `.github/workflows/ci.yml` has only been reasoned about, not
   actually run by GitHub Actions. Not blocking M4/M5/M6 work, only CI-on-push.
-- **`/tracks/{id}/play` 500s on every direct/hard navigation** (typed URL, bookmark, shared link,
-  hard reload — anything that isn't a client-side `<Link>` transition from an already-loaded page).
-  Found during M6b's live verification, not introduced by M6b: `apps/web/lib/player.ts`'s M6b Task
-  1 addition of `import { SoundTouchNode } from "@soundtouchjs/audio-worklet"` pulls in a
-  `class SoundTouchNode extends AudioWorkletNode` declaration that throws
-  `ReferenceError: AudioWorkletNode is not defined` the moment the module is evaluated on the
-  server (Next.js still evaluates a `"use client"` page's module graph server-side for the initial
-  HTML render, and `AudioWorkletNode` doesn't exist in Node.js) — verified in both `next dev` and a
-  real `next build && next start`, not a dev-only quirk. See M6b's `docs/STATUS.md` entry above for
-  the full account and fix candidates (most likely a client-only dynamic import of the
-  `StemPlayer`/`SoundTouchNode`-dependent module). Blocks nothing already shipped — every verified
-  user flow in this project reaches the player page via a client-side `<Link>` from `/tracks`,
-  which doesn't hit this path — but is a real defect for any direct/bookmarked/shared link to a
-  player page, and should be fixed before this matters in production.
 
 ## Next three actions
 
@@ -983,13 +973,7 @@ findings, all fixed:
      a real processing overrun could glitch the music itself, not just corrupt a pitch reading —
      this has never been exercised against a genuine simultaneous mic-capture-plus-playback session
      in this sandboxed environment, only against playback alone or a denied-permission mic flow.
-2. Fix the `/tracks/{id}/play` SSR 500 recorded under Blocked above: give
-   `apps/web/lib/player.ts`'s `@soundtouchjs/audio-worklet` import (or the `StemPlayer` module as a
-   whole) a client-only boundary — e.g. `next/dynamic(..., { ssr: false })` around the page's
-   player-dependent tree, or a `typeof window !== "undefined"` guard — so a direct/hard navigation
-   to the player page no longer 500s before Fast Refresh (dev-only) or client hydration
-   (production) can paper over it.
-3. Close `docs/PLAN.md` open question 5 (the ±50ms accuracy gap): try a larger wav2vec2 variant,
+2. Close `docs/PLAN.md` open question 5 (the ±50ms accuracy gap): try a larger wav2vec2 variant,
    check whether the separated vocal stem's audio quality degrades alignment precision versus the
    original mix, or investigate a systematic bias in the frame-to-millisecond conversion. Real work,
    not a merge blocker. Push to a GitHub remote (once one exists) to get CI actually running, and
