@@ -68,14 +68,22 @@ export class StemPlayer {
   private startedAtContextTime = 0;
   private startedAtOffsetSeconds = 0;
   private playing = false;
+  // Bumped every time sources are torn down (stopSources(), called from both pause()/seek() and
+  // from play() itself before starting a new session). Each source's onended handler closes over
+  // the token that was current when it started, so a manual stop (which bumps the token first)
+  // is distinguishable from a natural end (which fires with the still-current token).
+  private playToken = 0;
+  private onEnded: (() => void) | null;
 
-  constructor(context: AudioContext, buffers: StemBuffers) {
+  constructor(context: AudioContext, buffers: StemBuffers, onEnded?: () => void) {
     this.context = context;
     this.buffers = buffers;
+    this.onEnded = onEnded ?? null;
   }
 
   play(offsetSeconds = 0): void {
     this.stopSources();
+    const token = this.playToken;
     const stems: (keyof StemBuffers)[] = ["drums", "bass", "other"];
     this.sources = [];
     this.gains = [];
@@ -85,6 +93,7 @@ export class StemPlayer {
       const gain = this.context.createGain();
       gain.gain.value = 1;
       source.connect(gain).connect(this.context.destination);
+      source.onended = () => this.handleSourceEnded(token);
       source.start(0, offsetSeconds);
       this.sources.push(source);
       this.gains.push(gain);
@@ -119,7 +128,24 @@ export class StemPlayer {
     return this.playing;
   }
 
+  // Fires once per play() session, on whichever of the three sources' onended callbacks lands
+  // first. A stale token (this.playToken has since moved on, e.g. because pause()/seek() called
+  // stopSources()) means this source was stopped manually, not a natural end -- ignore it. The
+  // `playing` check additionally guards against this same session's other two sources firing
+  // their (also-genuine) natural-end callbacks a few ms later, after the first one already
+  // handled it.
+  private handleSourceEnded(token: number): void {
+    if (!this.playing || token !== this.playToken) return;
+    this.playing = false;
+    // A natural end means there's nothing left to resume -- the next play() call (e.g. from the
+    // user clicking Play again) should restart from the top, not from wherever playback happened
+    // to land.
+    this.startedAtOffsetSeconds = 0;
+    this.onEnded?.();
+  }
+
   private stopSources(): void {
+    this.playToken += 1;
     for (const source of this.sources) {
       try {
         source.stop();

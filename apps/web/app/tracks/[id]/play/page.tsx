@@ -85,6 +85,19 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
     }
   }
 
+  // Fired by StemPlayer when a track reaches its natural end (as opposed to an explicit pause()
+  // or seek() call). Stops the RAF loop so currentTimeMs doesn't keep growing past the track's
+  // real duration, flips the Play/Pause button back to "Play", and clamps the displayed playhead
+  // to the end of the track rather than wherever it happened to land.
+  function handleTrackEnded() {
+    if (rafRef.current !== null) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+    setIsPlaying(false);
+    setCurrentTimeMs(durationSecondsRef.current * 1000);
+  }
+
   async function ensurePlayerLoaded(current: PackageResponse): Promise<StemPlayer> {
     if (playerRef.current) return playerRef.current;
     setLoadingAudio(true);
@@ -97,7 +110,7 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
         decodeStem(context, current.stem_urls.other),
       ]);
       durationSecondsRef.current = Math.max(drums.duration, bass.duration, other.duration);
-      const player = new StemPlayer(context, { drums, bass, other });
+      const player = new StemPlayer(context, { drums, bass, other }, handleTrackEnded);
       playerRef.current = player;
       return player;
     } finally {
@@ -115,15 +128,23 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
 
   async function handlePlayPause() {
     if (!pkg) return;
-    const player = await ensurePlayerLoaded(pkg);
-    if (player.isPlaying) {
-      player.pause();
-      setIsPlaying(false);
-      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
-    } else {
-      player.play(player.currentTimeSeconds);
-      setIsPlaying(true);
-      rafRef.current = requestAnimationFrame(tick);
+    setError(null);
+    try {
+      const player = await ensurePlayerLoaded(pkg);
+      if (player.isPlaying) {
+        player.pause();
+        setIsPlaying(false);
+        if (rafRef.current !== null) {
+          cancelAnimationFrame(rafRef.current);
+          rafRef.current = null;
+        }
+      } else {
+        player.play(player.currentTimeSeconds);
+        setIsPlaying(true);
+        rafRef.current = requestAnimationFrame(tick);
+      }
+    } catch (err) {
+      setError((err as Error).message);
     }
   }
 
