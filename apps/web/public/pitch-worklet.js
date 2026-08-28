@@ -5,8 +5,9 @@
 //
 // process() delivers exactly 128 sample frames per call (the fixed Web Audio render quantum) --
 // far too short a window to resolve a vocal fundamental (an 80Hz note needs ~551 samples at
-// 44.1kHz just for two periods). This processor accumulates incoming blocks into its own ring
-// buffer and only runs YIN once enough new samples have arrived to advance by one hop.
+// 44.1kHz for even one period, and YIN needs at least two to find a match). This processor
+// accumulates incoming blocks into its own ring buffer and only runs YIN once enough new samples
+// have arrived to advance by one hop.
 
 const ANALYSIS_WINDOW_SIZE = 2048; // ~46ms at 44.1kHz
 const HOP_SIZE = 512; // ~11.6ms at 44.1kHz -- finer time resolution than the window itself
