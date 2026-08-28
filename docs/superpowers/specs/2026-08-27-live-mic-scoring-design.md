@@ -111,6 +111,17 @@ denies mic permission, or `AudioWorklet` init fails for any reason, the page fal
 M6a's existing playback-only experience — no error state blocking playback, no dead-end UI, since
 mic scoring is additive, not required to use the player.
 
+**Correction to this spec, found during the M6c final whole-branch review:** this decision's text
+above says calibration "starts playback immediately (from the current position)." The actual
+implementation, both before and after that review's fix round, calls `player.play(0)` — always
+restarting from the beginning of the track, not wherever playback happened to be when the toggle
+was clicked. The reviewer judged this the better design and confirmed it as the real, intentional
+behavior (not an unnoticed deviation caught late): a calibration window measured from a fixed point
+in the track is consistent every time, rather than one whose bleed characteristics vary depending
+on which part of the song happens to be playing — a quiet intro vs. a loud chorus — when the user
+enables mic scoring. This is what was actually built and approved through two rounds of task
+review before the final review even started.
+
 ## What M6c builds
 
 1. `apps/web/public/pitch-worklet.js` — the `AudioWorkletProcessor` subclass implementing YIN,

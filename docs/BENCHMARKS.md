@@ -167,3 +167,31 @@ plausible-looking number that wasn't actually measured.
 
 This is measured against the `local` CPU backend, same caveat as M3/M4's tables: not representative
 of eventual Modal/RunPod production timing, which is `TODO: unmeasured` until M7.
+
+## M6c: Pitch detection (YIN AudioWorklet)
+
+Measured on: 2026-08-27, in a real live browser session (`javascript_tool` against a running
+`AudioContext`), via the method in `docs/superpowers/plans/2026-08-27-live-mic-scoring.md`'s Task 1
+Step 2: an `OscillatorNode` set to a known frequency is connected into the worklet
+(`pitch-detector`, registered from `apps/web/public/pitch-worklet.js`) in place of a mic source, run
+for long enough to collect several readings, and the settled readings' `hz` values (the first few
+skipped while the ring buffer is still filling) are averaged.
+
+| Test signal | Measured avgHz |
+|---|---|
+| 440Hz oscillator | ≈440.02 |
+| 220Hz oscillator | ≈220.00 |
+
+Both numbers were independently reproduced twice — once by Task 1's implementer during its own live
+verification, and again by the task reviewer's independent re-run against the same method — with no
+octave error (YIN's well-known failure mode, which would show up as ≈880 or ≈220 for the 440Hz case)
+in either run.
+
+**What this measures, and what it does not:** this is the worklet's algorithmic accuracy against a
+clean, single-frequency synthetic signal with no noise, no harmonics beyond the oscillator's own,
+and no backing-track bleed — the easy case for a YIN-family detector, and it says nothing about
+real-world vocal pitch-tracking accuracy (a singing voice has vibrato, formants, and breath noise no
+oscillator has) or about bleed survival (`docs/PLAN.md` open question 3, `apps/web/lib/
+micScoring.ts`'s calibration/RMS-floor-gate mechanism). Both remain `TODO: unmeasured` — closing
+them needs a real human voice and, for bleed, a real room with real speakers and a real microphone,
+per this milestone's design spec and `docs/STATUS.md`'s M6c entry.

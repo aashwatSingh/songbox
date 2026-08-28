@@ -28,6 +28,10 @@ export class PitchTracker {
   private workletNode: AudioWorkletNode | null = null;
   private latestReading: PitchReading | null = null;
   private collector: ((reading: PitchReading) => void) | null = null;
+  // The `time` of the last reading returned by getLatestReadingIfNew(), so repeated calls within
+  // the same worklet hop (e.g. multiple RAF frames firing before the worklet posts again, on a
+  // high-refresh-rate display) can be told apart from a genuinely new reading.
+  private lastConsumedTime: number | null = null;
 
   constructor(context: AudioContext, micStream: MediaStream) {
     this.context = context;
@@ -47,6 +51,22 @@ export class PitchTracker {
 
   getLatestReading(): PitchReading | null {
     return this.latestReading;
+  }
+
+  // Like getLatestReading(), but returns null unless the current reading's `time` (the worklet's
+  // own clock, distinct from the RAF display refresh cadence) differs from the last reading this
+  // method itself returned. The worklet posts a new reading roughly every ~10-12ms, independent of
+  // requestAnimationFrame's cadence -- on a 60Hz display (~16.7ms/frame) some readings would
+  // otherwise never be consumed, and on a 120Hz display (~8.3ms/frame) the same reading would
+  // otherwise be consumed twice. Callers that need "count each real pitch reading exactly once"
+  // (e.g. ScoreTracker's frame count) should use this; getLatestReading() itself is unchanged for
+  // callers that just want "whatever the most recent value is right now" (e.g. a live Hz display).
+  getLatestReadingIfNew(): PitchReading | null {
+    const reading = this.latestReading;
+    if (reading === null) return null;
+    if (reading.time === this.lastConsumedTime) return null;
+    this.lastConsumedTime = reading.time;
+    return reading;
   }
 
   // Collects every reading that arrives over the next durationMs, for calibration. Temporarily

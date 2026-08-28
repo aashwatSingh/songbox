@@ -832,7 +832,25 @@ findings, all fixed:
 
 1. Run the real manual bleed-survival test M6c's mechanism still needs: a human singing along on
    a real device with real speakers/mic, to actually measure `docs/PLAN.md` open question 3 rather
-   than leave it `TODO: unmeasured`.
+   than leave it `TODO: unmeasured`. Concrete checklist for the tester to report back, not just a
+   general impression:
+   - (a) The calibrated bleed-floor RMS value observed (visible via a temporary console log or
+     debugger breakpoint on `bleedFloorRef.current` in `apps/web/app/tracks/[id]/play/page.tsx`
+     right after calibration completes).
+   - (b) `framesCounted` (same page, `scoreTrackerRef.current?.framesCounted`) after singing
+     through roughly one verse — confirms frames are actually being counted, not just that the UI
+     renders a plausible-looking percentage.
+   - (c) Whether the score ever gets stuck showing "Listening..." (the M6c final-review fix for
+     the zero-frames-counted display) rather than eventually producing a real percentage — stuck
+     "Listening..." would mean the bleed floor came out too high for any live frame to clear it.
+   - (d) Whether the live-pitch marker (the red dot on the pitch-lane SVG) stays visible and
+     tracks roughly with the sung note, or disappears / renders out of the visible lane bounds.
+   - (e) Whether the backing track's own audio audibly glitches, stutters, or drops out while mic
+     scoring is active. This is a real, flagged-but-unmeasured risk from the M6c final review: the
+     worklet's YIN computation is CPU-heavy and runs inside the same `AudioContext` as playback, so
+     a real processing overrun could glitch the music itself, not just corrupt a pitch reading —
+     this has never been exercised against a genuine simultaneous mic-capture-plus-playback session
+     in this sandboxed environment, only against playback alone or a denied-permission mic flow.
 2. Start M6b (stem mixer + transposition): independent volume/mute controls per stem, and
    key/tempo shifting via SoundTouch/Rubber Band compiled to WASM per `docs/PLAN.md`'s risk note
    on the original M6 estimate.

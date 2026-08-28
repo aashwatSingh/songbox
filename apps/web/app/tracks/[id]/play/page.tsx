@@ -60,6 +60,13 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
   const [durationSeconds, setDurationSeconds] = useState(0);
 
   const playerRef = useRef<StemPlayer | null>(null);
+  // Memoizes the in-flight ensurePlayerLoaded() promise (not just the resolved player), so
+  // overlapping callers -- e.g. handlePlayPause and handleEnableMicScoring, if a user clicks Play
+  // while the mic-permission prompt is still open -- await the SAME decode instead of each racing
+  // to create their own AudioContext/StemPlayer. playerRef.current is only ever assigned once, by
+  // whichever call actually started the in-flight promise; every other concurrent caller just
+  // awaits it.
+  const playerLoadPromiseRef = useRef<Promise<StemPlayer> | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const rafRef = useRef<number | null>(null);
   // Mirrors the effective (real-or-estimated) duration for handleTrackEnded's imperative read.
@@ -74,6 +81,7 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
   const [micError, setMicError] = useState<string | null>(null);
   const [liveHz, setLiveHz] = useState<number | null>(null);
   const [scorePercent, setScorePercent] = useState(0);
+  const [framesCounted, setFramesCounted] = useState(0);
 
   const pitchTrackerRef = useRef<PitchTracker | null>(null);
   const scoreTrackerRef = useRef<ScoreTracker | null>(null);
@@ -146,21 +154,40 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
 
   async function ensurePlayerLoaded(current: PackageResponse): Promise<StemPlayer> {
     if (playerRef.current) return playerRef.current;
+    // A load is already in flight (e.g. handlePlayPause was clicked while
+    // handleEnableMicScoring's own ensurePlayerLoaded() call is still awaiting mic permission, or
+    // vice versa) -- await that SAME promise instead of starting a second AudioContext/decode.
+    if (playerLoadPromiseRef.current) return playerLoadPromiseRef.current;
+
     setLoadingAudio(true);
+    const loadPromise = (async () => {
+      try {
+        const context = new AudioContext();
+        audioContextRef.current = context;
+        const [drums, bass, other] = await Promise.all([
+          decodeStem(context, current.stem_urls.drums),
+          decodeStem(context, current.stem_urls.bass),
+          decodeStem(context, current.stem_urls.other),
+        ]);
+        setDurationSeconds(Math.max(drums.duration, bass.duration, other.duration));
+        const player = new StemPlayer(context, { drums, bass, other }, handleTrackEnded);
+        playerRef.current = player;
+        return player;
+      } finally {
+        setLoadingAudio(false);
+      }
+    })();
+    playerLoadPromiseRef.current = loadPromise;
     try {
-      const context = new AudioContext();
-      audioContextRef.current = context;
-      const [drums, bass, other] = await Promise.all([
-        decodeStem(context, current.stem_urls.drums),
-        decodeStem(context, current.stem_urls.bass),
-        decodeStem(context, current.stem_urls.other),
-      ]);
-      setDurationSeconds(Math.max(drums.duration, bass.duration, other.duration));
-      const player = new StemPlayer(context, { drums, bass, other }, handleTrackEnded);
-      playerRef.current = player;
-      return player;
+      return await loadPromise;
     } finally {
-      setLoadingAudio(false);
+      // Left set on success (playerRef.current is now also set, so the fast-path check above
+      // short-circuits future calls before this ref is even consulted) and cleared on failure, so
+      // a later retry after a load error starts a fresh attempt rather than replaying the same
+      // rejected promise forever.
+      if (!playerRef.current) {
+        playerLoadPromiseRef.current = null;
+      }
     }
   }
 
@@ -172,19 +199,27 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
 
       const tracker = pitchTrackerRef.current;
       if (tracker) {
-        const reading = tracker.getLatestReading();
-        setLiveHz(reading?.hz ?? null);
+        // Display always shows whatever the current value is -- no need to dedupe against RAF's
+        // own cadence for a live number the eye reads continuously.
+        setLiveHz(tracker.getLatestReading()?.hz ?? null);
 
-        if (micActiveRef.current && reading && pkg) {
+        // Scoring must count each worklet reading exactly once, regardless of how RAF's cadence
+        // (display-refresh-rate-dependent) happens to line up with the worklet's own posting
+        // cadence (~10-12ms, fixed by its hop size) -- see PitchTracker.getLatestReadingIfNew()'s
+        // own comment. Using getLatestReading() here would either skip readings (60Hz display,
+        // RAF slower than the worklet) or double-count them (120Hz display, RAF faster).
+        const newReading = tracker.getLatestReadingIfNew();
+        if (micActiveRef.current && newReading && pkg) {
           const frameIndex = findActivePitchFrameIndex(pkg.karaoke.pitch.frames, nowMs);
           const targetHz = frameIndex >= 0 ? pkg.karaoke.pitch.frames[frameIndex].hz : null;
           scoreTrackerRef.current?.recordFrame(
-            reading.hz,
+            newReading.hz,
             targetHz,
-            reading.rms,
+            newReading.rms,
             bleedFloorRef.current
           );
           setScorePercent(scoreTrackerRef.current?.percentOnPitch ?? 0);
+          setFramesCounted(scoreTrackerRef.current?.framesCounted ?? 0);
         }
       }
 
@@ -246,6 +281,23 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
         micStream?.getTracks().forEach((track) => track.stop());
       }
     }
+  }
+
+  // The "Enable mic scoring" toggle's off switch -- the design spec calls this a toggle, but until
+  // this fix round the only way to stop scoring and release the mic was to navigate away or reload
+  // the page. Releases the mic (PitchTracker.stop() stops its tracks), drops both refs so a stale
+  // pitch/score tracker can't be reached from tick() any more, and resets the score/live-Hz display so
+  // a later re-enable doesn't show a stale number left over from the prior session. Playback itself
+  // is left running -- disabling mic scoring shouldn't also stop the music.
+  function handleDisableMicScoring() {
+    pitchTrackerRef.current?.stop();
+    pitchTrackerRef.current = null;
+    scoreTrackerRef.current = null;
+    micActiveRef.current = false;
+    setMicState("idle");
+    setScorePercent(0);
+    setFramesCounted(0);
+    setLiveHz(null);
   }
 
   async function handlePlayPause() {
@@ -421,7 +473,7 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
       <div className="flex items-center gap-3">
         <button
           onClick={handlePlayPause}
-          disabled={loadingAudio}
+          disabled={loadingAudio || micState === "requesting" || micState === "calibrating"}
           className="rounded bg-blue-600 px-4 py-2 text-white text-sm font-medium disabled:opacity-50"
         >
           {loadingAudio ? "Loading audio..." : isPlaying ? "Pause" : "Play"}
@@ -433,6 +485,7 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
           step={0.1}
           value={currentTimeMs / 1000}
           onChange={handleSeek}
+          disabled={loadingAudio || micState === "requesting" || micState === "calibrating"}
           className="flex-1"
         />
       </div>
@@ -453,9 +506,18 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
           <p className="text-sm text-zinc-500">Stay quiet -- calibrating...</p>
         )}
         {micState === "active" && (
-          <p className="text-sm text-zinc-600">
-            Mic scoring active &mdash; {scorePercent.toFixed(0)}% on pitch
-          </p>
+          <div className="flex items-center gap-3">
+            <p className="text-sm text-zinc-600">
+              Mic scoring active &mdash;{" "}
+              {framesCounted === 0 ? "Listening..." : `${scorePercent.toFixed(0)}% on pitch`}
+            </p>
+            <button
+              onClick={handleDisableMicScoring}
+              className="rounded border border-zinc-400 px-3 py-1 text-zinc-600 text-xs font-medium"
+            >
+              Disable mic scoring
+            </button>
+          </div>
         )}
         {micError && <p className="mt-2 text-red-600 text-sm">{micError}</p>}
       </div>
