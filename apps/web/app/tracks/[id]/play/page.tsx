@@ -203,11 +203,13 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
         // own cadence for a live number the eye reads continuously.
         setLiveHz(tracker.getLatestReading()?.hz ?? null);
 
-        // Scoring must count each worklet reading exactly once, regardless of how RAF's cadence
-        // (display-refresh-rate-dependent) happens to line up with the worklet's own posting
-        // cadence (~10-12ms, fixed by its hop size) -- see PitchTracker.getLatestReadingIfNew()'s
-        // own comment. Using getLatestReading() here would either skip readings (60Hz display,
-        // RAF slower than the worklet) or double-count them (120Hz display, RAF faster).
+        // Scoring must never double-count the same worklet reading, regardless of how RAF's
+        // cadence (display-refresh-rate-dependent) happens to line up with the worklet's own
+        // posting cadence (~10-12ms, fixed by its hop size) -- see
+        // PitchTracker.getLatestReadingIfNew()'s own comment for what this does and doesn't
+        // guarantee. Using plain getLatestReading() here would double-count on a fast (120Hz)
+        // display; getLatestReadingIfNew() fixes that, though on a slow (60Hz) display some
+        // worklet readings still simply never get polled for and are missed, not double-counted.
         const newReading = tracker.getLatestReadingIfNew();
         if (micActiveRef.current && newReading && pkg) {
           const frameIndex = findActivePitchFrameIndex(pkg.karaoke.pitch.frames, nowMs);

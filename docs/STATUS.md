@@ -44,16 +44,28 @@ in this sandboxed browser environment hit `getUserMedia`'s real permission gate 
 blocked in the Browser pane's automated tooling — an environment limitation, not a bug), which
 exercised and confirmed the intended fallback path: `micError` renders "Permission denied", the mic
 flow cleanly resets to `idle` allowing retry, and ordinary playback continues completely unaffected
-— no dead end, no console errors, no side effects on the rest of the page. Because a real mic grant
-could not be obtained in this environment, the calibrating→active transition, the live-pitch marker,
-and the score-percentage readout were **not** observed live end-to-end; instead, `hzToCents`'s and
-`ScoreTracker`'s pure logic were verified directly (pasted into a live `javascript_tool` console
-session and run against fabricated readings): `hzToCents(440, 440) = 0`, `hzToCents(466.16, 440) ≈
-99.99` (a semitone), `hzToCents(880, 440) = 1200` (an octave), and a `ScoreTracker` fed 6 frames
-(one exact match, one ~20 cents sharp, one ~204 cents sharp, one below the bleed floor, one with a
-null live Hz, one with a null target Hz) correctly counted only the 3 frames with both a valid Hz
-pair and RMS above the floor, scoring 2 of those 3 as on-pitch — 66.67%, exactly as the tolerance
-and gating logic predict.
+— no dead end, no console errors, no side effects on the rest of the page. Task 2's own pass could
+not get past this permission gate, so at that point the calibrating→active transition, the
+live-pitch marker, and the score-percentage readout were verified only via `hzToCents`'s and
+`ScoreTracker`'s pure logic (pasted into a live `javascript_tool` console session and run against
+fabricated readings): `hzToCents(440, 440) = 0`, `hzToCents(466.16, 440) ≈ 99.99` (a semitone),
+`hzToCents(880, 440) = 1200` (an octave), and a `ScoreTracker` fed 6 frames (one exact match, one
+~20 cents sharp, one ~204 cents sharp, one below the bleed floor, one with a null live Hz, one with
+a null target Hz) correctly counted only the 3 frames with both a valid Hz pair and RMS above the
+floor, scoring 2 of those 3 as on-pitch — 66.67%, exactly as the tolerance and gating logic
+predict.
+
+**The final whole-branch review's fix round went further**: rather than stop at the permission
+gate, it monkey-patched `navigator.mediaDevices.getUserMedia` from the browser console (never in
+committed source) to resolve with a real `MediaStream` produced by a real `OscillatorNode` through
+a `MediaStreamAudioDestinationNode` — a fake *microphone*, but every downstream step is the real,
+unmodified application code (`PitchTracker.init()`, the real worklet fetch and YIN algorithm, the
+real `measureBleedFloor()`, `ScoreTracker`, and the real `tick()`/RAF loop). Against that fake
+input, the calibrating→active transition, the "Listening..." → real-percentage transition, and the
+disable-mic-scoring control were all observed live, end-to-end, not just by code inspection — see
+the M6c final-review fix round's commit for the full account. This is real execution against a
+synthetic signal, explicitly **not** a substitute for the real human-voice bleed-survival test
+below, which remains untested.
 
 **Real-world bleed survival — `docs/PLAN.md` open question 3 — remains genuinely unmeasured.**
 This is stated plainly per `CLAUDE.md`'s measurement-discipline rule: it requires a human singing

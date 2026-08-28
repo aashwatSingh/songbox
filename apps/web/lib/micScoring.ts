@@ -56,11 +56,16 @@ export class PitchTracker {
   // Like getLatestReading(), but returns null unless the current reading's `time` (the worklet's
   // own clock, distinct from the RAF display refresh cadence) differs from the last reading this
   // method itself returned. The worklet posts a new reading roughly every ~10-12ms, independent of
-  // requestAnimationFrame's cadence -- on a 60Hz display (~16.7ms/frame) some readings would
-  // otherwise never be consumed, and on a 120Hz display (~8.3ms/frame) the same reading would
-  // otherwise be consumed twice. Callers that need "count each real pitch reading exactly once"
-  // (e.g. ScoreTracker's frame count) should use this; getLatestReading() itself is unchanged for
-  // callers that just want "whatever the most recent value is right now" (e.g. a live Hz display).
+  // requestAnimationFrame's cadence -- on a 120Hz display (~8.3ms/frame) the same reading would
+  // otherwise be consumed twice, double-weighting it in a running score. This does NOT guarantee
+  // every worklet reading gets observed: on a 60Hz display (~16.7ms/frame), polling slower than the
+  // worklet posts still means some readings are never polled for at all and are silently missed --
+  // this method only de-duplicates whatever it *does* see, it doesn't queue or replay what it
+  // missed. The resulting sample is refresh-rate-independent and never double-counted, which is
+  // what a fair score denominator needs; it isn't a complete census of every reading. Callers that
+  // need that de-duplication (e.g. ScoreTracker's frame count) should use this; getLatestReading()
+  // itself is unchanged for callers that just want "whatever the most recent value is right now"
+  // (e.g. a live Hz display).
   getLatestReadingIfNew(): PitchReading | null {
     const reading = this.latestReading;
     if (reading === null) return null;
