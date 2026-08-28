@@ -44,23 +44,43 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTimeMs, setCurrentTimeMs] = useState(0);
 
+  // Real decoded-audio duration, in seconds -- stays 0 until ensurePlayerLoaded() has actually
+  // decoded the stems (i.e. the first Play click). Before that, rendering below falls back to
+  // estimatedDurationSeconds (derived straight from the package's own data) instead of treating
+  // an unset 0/1 as a real duration.
+  const [durationSeconds, setDurationSeconds] = useState(0);
+
   const playerRef = useRef<StemPlayer | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const rafRef = useRef<number | null>(null);
+  // Mirrors the effective (real-or-estimated) duration for handleTrackEnded's imperative read.
+  // Written directly during render (not from an effect) so it's always current by the time a
+  // natural track-end can fire -- avoids handleTrackEnded's own closure only ever seeing the
+  // duration value from whichever render happened to be active when ensurePlayerLoaded() ran.
   const durationSecondsRef = useRef(0);
 
   useEffect(() => {
-    setNotReady(false);
-    setError(null);
+    let cancelled = false;
     getPackage(id)
-      .then(setPkg)
+      .then((result) => {
+        if (cancelled) return;
+        setPkg(result);
+        setNotReady(false);
+        setError(null);
+      })
       .catch((err: Error) => {
+        if (cancelled) return;
         if (err.message.toLowerCase().includes("no karaoke package")) {
           setNotReady(true);
+          setError(null);
         } else {
           setError(err.message);
+          setNotReady(false);
         }
       });
+    return () => {
+      cancelled = true;
+    };
   }, [id]);
 
   useEffect(() => {
@@ -109,7 +129,7 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
         decodeStem(context, current.stem_urls.bass),
         decodeStem(context, current.stem_urls.other),
       ]);
-      durationSecondsRef.current = Math.max(drums.duration, bass.duration, other.duration);
+      setDurationSeconds(Math.max(drums.duration, bass.duration, other.duration));
       const player = new StemPlayer(context, { drums, bass, other }, handleTrackEnded);
       playerRef.current = player;
       return player;
@@ -163,6 +183,51 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
     [pkg, currentTimeMs]
   );
 
+  // Estimated duration derived straight from the package's own data (last pitch frame / last
+  // word), used as the fallback before any real audio has been decoded -- fixes the bogus 1ms
+  // duration the pitch lane and seek bar used to render against on first paint.
+  const estimatedDurationSeconds = useMemo(() => {
+    if (!pkg) return 1;
+    const lastFrameMs = pkg.karaoke.pitch.frames.length
+      ? pkg.karaoke.pitch.frames[pkg.karaoke.pitch.frames.length - 1].time_ms
+      : 0;
+    const lastWordMs = pkg.karaoke.words.length
+      ? pkg.karaoke.words[pkg.karaoke.words.length - 1].end_ms
+      : 0;
+    const estimateMs = Math.max(lastFrameMs, lastWordMs);
+    return estimateMs > 0 ? estimateMs / 1000 : 1;
+  }, [pkg]);
+
+  // Real decoded duration once known (from ensurePlayerLoaded), otherwise the estimate above.
+  const effectiveDurationSeconds =
+    durationSeconds > 0 ? durationSeconds : estimatedDurationSeconds;
+  // Keep the imperative-read mirror current every render (see the ref's declaration comment).
+  durationSecondsRef.current = effectiveDurationSeconds;
+  const durationMs = effectiveDurationSeconds * 1000;
+
+  // Math.max(1, ...frames.map(...)) throws RangeError: Maximum call stack size exceeded once the
+  // spread exceeds V8's ~65,535 argument-count limit -- reachable on any track past ~11 minutes
+  // (this pipeline's cap is 720s / ~72,000 CREPE frames at a 10ms hop). reduce() has no such
+  // limit and is behaviorally identical, including the empty-array case (still returns 1).
+  const maxPitchHz = useMemo(
+    () => (pkg ? pkg.karaoke.pitch.frames.reduce((max, f) => Math.max(max, f.hz ?? 0), 1) : 1),
+    [pkg]
+  );
+
+  // Memoized so this doesn't re-run 60x/sec during playback (the RAF loop drives currentTimeMs,
+  // which is NOT a dependency here) -- only when the underlying frame data or duration changes,
+  // which happens once, when the package loads / real duration becomes known.
+  const pitchPoints = useMemo(() => {
+    if (!pkg) return "";
+    return pkg.karaoke.pitch.frames
+      .map((f) => {
+        const x = (f.time_ms / durationMs) * 400;
+        const y = f.hz === null ? 60 : 60 - (f.hz / maxPitchHz) * 55;
+        return `${x},${y}`;
+      })
+      .join(" ");
+  }, [pkg, durationMs, maxPitchHz]);
+
   if (error) {
     return (
       <main className="max-w-2xl mx-auto py-12 px-6">
@@ -198,8 +263,6 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
   }
 
   const lyricsWithheld = pkg.karaoke.words.every((w) => w.text === null);
-  const maxPitchHz = Math.max(1, ...pkg.karaoke.pitch.frames.map((f) => f.hz ?? 0));
-  const durationMs = Math.max(1, durationSecondsRef.current * 1000);
   const playheadX = (currentTimeMs / durationMs) * 400;
 
   return (
@@ -226,13 +289,7 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
         </div>
         <svg viewBox="0 0 400 60" className="w-full h-[60px] block">
           <polyline
-            points={pkg.karaoke.pitch.frames
-              .map((f) => {
-                const x = (f.time_ms / durationMs) * 400;
-                const y = f.hz === null ? 60 : 60 - (f.hz / maxPitchHz) * 55;
-                return `${x},${y}`;
-              })
-              .join(" ")}
+            points={pitchPoints}
             fill="none"
             stroke="#8fd6ff"
             strokeWidth={2}
@@ -262,7 +319,7 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
         <input
           type="range"
           min={0}
-          max={durationSecondsRef.current || 1}
+          max={effectiveDurationSeconds || 1}
           step={0.1}
           value={currentTimeMs / 1000}
           onChange={handleSeek}

@@ -1,6 +1,120 @@
 # Status
 
-Last updated: 2026-08-23.
+Last updated: 2026-08-27.
+
+## Done — M6a complete
+
+M6a's scope (the core synced player — read endpoint, `karaoke.json` v1 assembly and schema
+validation, and Web Audio playback with word-highlight lyrics and a pitch-lane visualization,
+closing `docs/PLAN.md` open question 10) is built and verified end to end, across two tasks plus
+this fix round:
+
+What was built:
+- **`GET /tracks/{track_id}/package`** (`services/api/app/routes/tracks.py`) — assembles the flat
+  `karaoke_packages` columns M5 wrote into the versioned `karaoke.json` v1 document
+  `docs/PLAN.md`'s original M5 wording called for and M5's design spec deliberately deferred to
+  M6 (see `docs/STATUS.md`'s M5 entry and `docs/PLAN.md` open question 10). The assembled document
+  is schema-validated (`services/api/app/karaoke_schema.py`) before being returned. Lyric text is
+  nulled per the row's stored `lyrics_display_allowed`, same rule applied at write time in M5 and
+  at read time everywhere else in this codebase. Returns 404 when no package exists yet for the
+  track (the player's "not ready" state) and includes proxy URLs for each non-vocal stem rather
+  than presigned MinIO URLs — a spec correction made during planning (commit `8e8ded0`) so stem
+  audio stays behind the same dev-auth-stub identity gate as every other route, instead of a
+  separately-scoped signed-URL trust boundary.
+- **`GET /tracks/{track_id}/stems/{stem_type}`** — proxies stem audio bytes through FastAPI
+  (drums/bass/other; vocals intentionally excluded, since the player never plays back the isolated
+  vocal stem itself per the design spec) rather than redirecting to a presigned URL, for the same
+  reason above.
+- **`apps/web/lib/player.ts`** — `StemPlayer`, a small class playing the three non-vocal stems
+  sample-aligned via the Web Audio API (independent `GainNode`s per stem, left at gain=1 in M6a —
+  M6b's stem-mixer milestone will expose these as real controls without touching this class's
+  playback logic), plus binary-search helpers (`findActiveWordIndex`,
+  `findActivePitchFrameIndex`) locating the current word/pitch-frame for a given playhead time.
+- **`apps/web/app/tracks/[id]/play/page.tsx`** — the synced player page: word-by-word lyric
+  highlight (or a "lyric display isn't permitted" notice when `lyrics_display_allowed` is false,
+  same degraded-state pattern as the editor), an SVG pitch-lane visualization with a moving
+  playhead, and transport controls (play/pause/seek) driven by a `requestAnimationFrame` loop
+  reading `StemPlayer.currentTimeSeconds`.
+
+108 tests pass (up from M5's 101); `ruff check .` and `mypy app` (strict) both clean in
+`services/api`. `npm run lint` and `npx tsc --noEmit` both clean in `apps/web`.
+
+Verified with a real live browser session against real running servers, per this project's
+established UI/glue-code exemption from test-first: play/pause/seek, word-highlight advancing,
+pitch-lane playhead tracking, pause-then-resume preserving position, and natural track-end
+clamping/resetting were all exercised against a real generated package.
+
+A final whole-branch review found real issues across both already task-reviewed tasks, fixed in
+two rounds:
+
+Task 2's own fix round (commit `55d774a`), before the whole-branch review:
+- **An unbounded playback loop** — the `requestAnimationFrame` tick continued past a track's
+  natural end in some cases, growing `currentTimeMs` past the real duration instead of stopping.
+  Fixed by having `StemPlayer` fire an explicit `onEnded` callback on natural completion
+  (distinguished from a manual `pause()`/`seek()` stop via a bumped `playToken`, so a stale
+  callback from a torn-down session can't fire spuriously), which the page uses to cancel the RAF
+  loop, flip the Play/Pause button back to "Play", and clamp the displayed playhead to the track's
+  real duration.
+- **Silent stem-decode errors** — a failed `decodeAudioData()` or stem fetch previously left the
+  page stuck on "Loading audio..." with no feedback. Fixed to surface the error message in the
+  page's existing error state.
+
+The final whole-branch review (this fix round) found 5 more real issues, all fixed in one pass:
+- **Important — `npm run lint` was red**, a whole-branch regression every prior milestone kept
+  clean (this file's M4b entry records `npm run lint` passing explicitly, and CI runs it as a
+  gate). The package-fetch `useEffect` in `apps/web/app/tracks/[id]/play/page.tsx` called
+  `setNotReady(false)`/`setError(null)` synchronously in the effect body before the async fetch,
+  tripping `react-hooks/set-state-in-effect`. Restructured so both resets happen inside the async
+  `.then()`/`.catch()` handlers instead, and added a `cancelled` guard so a stale response can't
+  overwrite state if `id` changes before the fetch resolves — closing a latent race the original
+  version had, not just the lint error.
+- **Important — `Math.max(1, ...pkg.karaoke.pitch.frames.map(...))` throws `RangeError` on a
+  long-enough track.** CREPE emits a pitch frame every 10ms (`CREPE_HOP_MS` in
+  `services/api/app/packaging.py`), so this pipeline's 720-second duration cap
+  (`MAX_DURATION_SECONDS` in `services/api/app/fingerprint.py`) produces roughly 72,000 frames --
+  above V8's function-argument-spread limit, an uncaught render-time crash reachable on any track
+  well within what this pipeline accepts. Replaced with `frames.reduce((max, f) => Math.max(max,
+  f.hz ?? 0), 1)` -- identical behavior (including the empty-array case, still returning `1`), no
+  argument-count limit. Live-verified in a real browser console: `Math.max(1,
+  ...new Array(200000).fill(0))` throws `RangeError: Maximum call stack size exceeded` in this
+  project's actual browser environment (the threshold observed was between 100,000 and 200,000
+  elements, higher than the commonly-cited ~65,535 figure -- engine/stack-budget-dependent, not a
+  fixed constant, but the failure mode is real), while the equivalent `reduce()` ran cleanly at
+  1,000,000 elements.
+- **Important — the pitch-lane polyline's `points` string was rebuilt on every render at ~60fps
+  during playback**, since the RAF tick loop calls `setCurrentTimeMs` on every animation frame,
+  and the map+join over the full frame array (up to ~72,000 iterations / ~800KB string at the
+  duration cap) was inline in JSX with no memoization -- real, measurable playback jank on
+  realistic track lengths. Wrapped in `useMemo` keyed on `[pkg, durationMs, maxPitchHz]`, none of
+  which change during playback (only `currentTimeMs` does, and it is deliberately not a
+  dependency) -- confirmed live that the pitch lane's `points` attribute and rendering stayed
+  stable across playback frames while the playhead line still moved every frame as expected.
+- **Important — the pitch lane and seek bar rendered against a bogus 1ms duration until the first
+  Play click.** The real duration lived only in a `useRef` populated inside `ensurePlayerLoaded()`
+  (which doesn't run until the user clicks Play), so every pre-Play render computed
+  `durationMs = Math.max(1, 0 * 1000) = 1`, collapsing every pitch-lane x-coordinate and giving the
+  seek bar a `max={1}`. There was also a correctness gap independent of the visible bug: reading a
+  ref during render has no render-triggering guarantee, and the old code only happened to
+  re-render correctly because `setLoadingAudio(false)` (a real state update) fired incidentally
+  afterward in the same function. Fixed with two changes: converted the real duration to
+  `useState`, set from `ensurePlayerLoaded()` once the stems are actually decoded; and added an
+  `estimatedDurationSeconds` fallback (`useMemo` on `pkg`, taking the max of the last pitch
+  frame's `time_ms` and the last word's `end_ms`, falling back to a 1-second default only if both
+  arrays are empty) used whenever the real duration isn't known yet. Live-verified: on a real
+  ~5-second test track, the seek bar's `max` and the pitch lane's x-coordinate span were both
+  already correct (matching the track's real duration) on first paint, before any Play click.
+- **Important, docs-only — no completion record for M6a.** This entry, plus updating
+  `docs/PLAN.md`'s M6 entry to record the real M6a/M6b/M6c split and mark open question 10's
+  read-path sub-question resolved.
+
+Deliberately out of scope, matching the design spec's own scope decisions:
+- **The stem mixer and transposition** (M6b) — the three non-vocal stems play at a fixed gain in
+  M6a; independent volume/mute controls and key/tempo shifting are M6b's job.
+- **Live mic pitch scoring and calibration** (M6c) — a real mic input pipeline, scoring against the
+  pitch contour, and a calibration flow, none of which M6a touches.
+- **Real authentication** — `docs/PLAN.md` open question 9, unchanged by this milestone; the
+  player page's raw stem fetch explicitly documents that it's still gated by the same dev-auth-stub
+  identity headers as every other route, not real auth.
 
 ## Done — M5 complete
 
@@ -626,30 +740,33 @@ findings, all fixed:
 
 ## In flight
 
-- Nothing mid-work right now. M0, M1, M2, M3, M4a, M4b, and M5 are all done. M4a's measured
+- Nothing mid-work right now. M0, M1, M2, M3, M4a, M4b, M5, and M6a are all done. M4a's measured
   aligned-English accuracy (68.2ms median, 37.2% within 50ms) does not meet `docs/PLAN.md`'s
   ±50ms acceptance criterion — see M4a's entry below. That decision has been made, not left
   pending: merge M4a as engineering-complete with the gap documented, tracked as real follow-up
   work (`docs/PLAN.md` open question 5, commit `d3ff5ff`), not a merge blocker. Real
   authentication remains a genuine, tracked gap across the whole project — `docs/PLAN.md` open
-  question 9. M5's narrowed scope (extraction-only, no assembled `karaoke.json`, no read endpoint)
-  is tracked as `docs/PLAN.md` open question 10, owned by M6.
+  question 9. M6a closed the read-path sub-question of `docs/PLAN.md` open question 10 (the
+  `GET /tracks/{id}/package` read endpoint, `karaoke.json` v1 assembly, and schema validation now
+  exist); the stem-mixer/transposition (M6b) and live-mic-pitch (M6c) parts of the original M6
+  scope remain open, along with open question 3 (live pitch detection under mic bleed), which M6c
+  owns.
 
 ## Blocked
 
 - **No GitHub remote configured yet**, so `.github/workflows/ci.yml` has only been reasoned about, not
-  actually run by GitHub Actions. Not blocking M4/M5 work, only CI-on-push.
+  actually run by GitHub Actions. Not blocking M4/M5/M6a work, only CI-on-push.
 
 ## Next three actions
 
-1. Start M6 (the player — Web Audio playback, word highlight, pitch lane, live mic pitch,
-   transposition, stem mixer, calibration). M6 also owns `docs/PLAN.md` open question 10 (the
-   `GET /tracks/{id}/package` read endpoint, `karaoke.json` v1 assembly, and schema validation)
-   and open question 3 (live pitch detection under mic bleed).
+1. Start M6b (stem mixer + transposition): independent volume/mute controls per stem, and
+   key/tempo shifting via SoundTouch/Rubber Band compiled to WASM per `docs/PLAN.md`'s risk note
+   on the original M6 estimate.
 2. Close `docs/PLAN.md` open question 5 (the ±50ms accuracy gap): try a larger wav2vec2 variant,
    check whether the separated vocal stem's audio quality degrades alignment precision versus the
    original mix, or investigate a systematic bias in the frame-to-millisecond conversion. Real work,
-   not a merge blocker — should land before M6's word-highlight UX depends on tight timing.
+   not a merge blocker, but real work that should land before M6b/M6c depend on tight timing more
+   than M6a's word-highlight already does.
 3. Push to a GitHub remote (once one exists) to get CI actually running. Also revisit
    `docs/PLAN.md` open question 9 (real authentication) whenever a milestone's scope can actually
    absorb it.

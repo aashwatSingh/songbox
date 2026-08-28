@@ -100,9 +100,28 @@ Each ends with working, tested, committed code and an updated `STATUS.md`.
     (upload→approve→separate→correct→re-align, both locked states, no console errors) as well as
     automated tests, per the working agreement's UI/glue-code exemption from test-first.
 - **M5 — Pitch + structure (1 session).** CREPE contour, beat grid, sections, `karaoke.json` v1 emitted
-  and schema-validated.
-- **M6 — Player (3+ sessions — see risk note).** Web Audio playback, word highlight, pitch lane, live
-  mic pitch, transposition, stem mixer, calibration.
+  and schema-validated. **Narrowed during the approved design spec** to extraction-only, flat DB
+  columns — the assembled `karaoke.json` document, its schema validation, and a read endpoint were
+  deferred to M6, recorded as open question 10 below (see `docs/STATUS.md`'s M5 entry).
+- **M6 — Player (3+ sessions — see risk note).** Split into three sub-milestones during
+  brainstorming, since the original scope bundled the deferred read/assembly/validation path from
+  M5, core Web Audio playback, and two nontrivial R&D items (WASM pitch/tempo shifting, live mic
+  pitch detection) into one unit:
+  - **M6a — Core synced player (done, see `docs/STATUS.md`).** `GET /tracks/{id}/package`
+    (assembling M5's flat columns into the versioned `karaoke.json` v1 document and
+    schema-validating it — closing the read-path part of open question 10 below) and
+    `GET /tracks/{id}/stems/{stem_type}` (proxying stem audio through FastAPI rather than
+    presigned MinIO URLs, a spec correction made during planning — commit `8e8ded0`), plus the
+    `/tracks/{id}/play` page: Web Audio playback of the three non-vocal stems sample-aligned via
+    `StemPlayer`, word-highlight lyrics, and an SVG pitch-lane visualization with a moving
+    playhead.
+  - **M6b — Stem mixer + transposition (not started).** Independent per-stem volume/mute controls
+    (the `GainNode`s M6a's `StemPlayer` already creates, currently fixed at gain=1, are built to
+    take real control input without needing rework), plus key/tempo shifting — the
+    SoundTouch/Rubber Band-to-WASM R&D item the risk note below originally flagged.
+  - **M6c — Live mic pitch scoring + calibration (not started).** Live pitch detection in an
+    AudioWorklet against a phone mic with backing-track bleed (open question 3 below), scored
+    against M6a's pitch contour, plus a calibration flow.
 - **M7 — Harden and launch (2 sessions).** Retention purge, takedown endpoint, rate limits,
   observability, load test, **swap the GPU backend from local to Modal/RunPod and validate the
   no-egress sandbox for real** (this is the first point the sandbox claim is actually true, not just
@@ -113,10 +132,12 @@ scoring/leaderboards, a hosted song catalog, payments.
 
 ## Risk notes on the estimates above
 
-- **M6** bundles two nontrivial R&D items into a 3-session estimate: SoundTouch/Rubber Band compiled to
-  WASM for independent key/tempo control, and live pitch detection in an AudioWorklet that has to
-  survive backing-track bleed into a phone mic. Expect this to run long; split it into sub-milestones
-  once the WASM integration is attempted rather than letting it silently blow the estimate.
+- **M6** originally bundled two nontrivial R&D items into a 3-session estimate: SoundTouch/Rubber Band
+  compiled to WASM for independent key/tempo control, and live pitch detection in an AudioWorklet that
+  has to survive backing-track bleed into a phone mic. This played out as anticipated: M6 was split
+  into M6a/M6b/M6c (see the M6 milestone entry above) before the WASM/live-mic work was attempted, with
+  M6a landing the read path and core Web Audio playback first and the two R&D items pushed to their own
+  M6b/M6c sub-milestones rather than silently blowing the original estimate.
 - **M7**'s backend swap (local → Modal/RunPod) is where the spec's "no network egress" sandbox
   guarantee is first actually tested. Local dev runs through M0–M6 do not validate that constraint —
   see `CLAUDE.md`.
@@ -156,17 +177,20 @@ milestone reaches them):
    model (identity provider, tenant provisioning, migration path for existing dev-stub data)?
    Genuinely open -- not silently assumed solved.
 
-10. **New in M5.** `docs/PLAN.md`'s original M5 entry called for "`karaoke.json` v1 emitted and
-    schema-validated," but the approved M5 design spec
+10. **New in M5. Read-path resolved in M6a** -- `docs/PLAN.md`'s original M5 entry called for
+    "`karaoke.json` v1 emitted and schema-validated," but the approved M5 design spec
     (`docs/superpowers/specs/2026-08-23-pitch-structure-design.md`) narrowed this to flat DB
     columns on a new `karaoke_packages` table -- no assembled `karaoke.json` JSON document, no
     JSON Schema validation, and no read (`GET`) endpoint. This was discussed with the project
-    owner and decided, not silently narrowed: M5 stays extraction-only (pitch contour, beat grid,
-    section boundaries, all written as flat columns via `POST /tracks/{id}/package`), and M6 (the
-    player milestone -- the actual consumer of this data) is responsible for adding a new
-    `GET /tracks/{id}/package` read endpoint, assembling the stored columns into the versioned
-    `karaoke.json` v1 shape, and adding schema validation, before the player ever consumes this
-    data. Genuinely open until M6 -- not silently assumed solved.
+    owner and decided, not silently narrowed: M5 stayed extraction-only (pitch contour, beat grid,
+    section boundaries, all written as flat columns via `POST /tracks/{id}/package`), and M6a (see
+    `docs/STATUS.md`) added `GET /tracks/{id}/package`, assembling the stored columns into the
+    versioned `karaoke.json` v1 shape (`services/api/app/karaoke_schema.py`) and schema-validating
+    it before the player consumes it. **That sub-question is resolved** -- the endpoint exists,
+    `karaoke.json` v1 is assembled and validated on every read. What's still open is everything
+    M6b/M6c layer on top of this data (stem-mixer/transposition controls, live mic pitch scoring
+    against the pitch contour, calibration) -- none of that is a "was the read path ever built"
+    question anymore, just remaining scope tracked under M6b/M6c above.
 
 Resolved during this planning pass (see `docs/DECISIONS_LOG.md` for full reasoning):
 
