@@ -119,9 +119,14 @@ Each ends with working, tested, committed code and an updated `STATUS.md`.
     (the `GainNode`s M6a's `StemPlayer` already creates, currently fixed at gain=1, are built to
     take real control input without needing rework), plus key/tempo shifting — the
     SoundTouch/Rubber Band-to-WASM R&D item the risk note below originally flagged.
-  - **M6c — Live mic pitch scoring + calibration (not started).** Live pitch detection in an
-    AudioWorklet against a phone mic with backing-track bleed (open question 3 below), scored
-    against M6a's pitch contour, plus a calibration flow.
+  - **M6c — Live mic pitch scoring + calibration (done, see `docs/STATUS.md`).** YIN pitch
+    detection in an `AudioWorkletProcessor` (`apps/web/public/pitch-worklet.js`), wired into the
+    `/tracks/{id}/play` page via `apps/web/lib/micScoring.ts`: a per-session bleed calibration
+    (measures the mic's RMS floor with only the backing track playing, before scoring starts) and
+    cents-based scoring against M6a's stored pitch contour. Real-world bleed survival (open
+    question 3 below) is mechanically implemented but not yet measured against a real mic/speaker
+    setup — `TODO: unmeasured`, tracked as a pending manual follow-up, not closed by this
+    milestone.
 - **M7 — Harden and launch (2 sessions).** Retention purge, takedown endpoint, rate limits,
   observability, load test, **swap the GPU backend from local to Modal/RunPod and validate the
   no-egress sandbox for real** (this is the first point the sandbox claim is actually true, not just
@@ -152,7 +157,12 @@ milestone reaches them):
 2. AcoustID false-negative rate on independent/unreleased music: is it acceptable given the gate exists
    to catch *commercial* leakage, not to be a complete catalog match? Measure during M1.
 3. Live pitch detection under speaker/mic bleed: which algorithm survives a phone mic in a room with the
-   backing track playing out loud? Open through M6.
+   backing track playing out loud? **M6c built the mechanism** (YIN pitch detection, an
+   `echoCancellation`-enabled mic constraint, a per-session bleed-floor calibration measured with
+   the backing track already playing, and an RMS gate excluding any frame that doesn't clear the
+   calibrated floor) but has NOT measured real bleed survival -- that needs a human singing near
+   real speakers, which no automated agent session can produce. Still open pending that manual
+   test pass; `TODO: unmeasured`.
 4. Cost per track end-to-end, at what GPU instance size, and where that puts the price floor. Only
    answerable once M7's real cloud backend is wired up and benchmarked — `TODO: unmeasured` until then.
 5. **New in M4a.** Alignment accuracy is 68.2ms median (37.2% within 50ms), missing the ±50ms target —

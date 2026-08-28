@@ -2,6 +2,75 @@
 
 Last updated: 2026-08-27.
 
+## Done — M6c complete
+
+M6c's scope (live mic pitch scoring, closing the mechanism half of `docs/PLAN.md` open question 3
+against M6a's stored pitch contour) is built and verified for mechanics, across two tasks:
+
+What was built:
+- **`apps/web/public/pitch-worklet.js`** (Task 1) — a plain-JS `AudioWorkletProcessor` registered
+  as `"pitch-detector"`, running the YIN pitch-detection algorithm on whatever audio source it's
+  connected to and posting `{time, hz, rms}` messages via its `port` on a ring buffer accumulated
+  across the 128-frame chunks `process()` delivers. Live-verified in Task 1 against real 440Hz/220Hz
+  oscillators with sub-Hz accuracy.
+- **`apps/web/lib/micScoring.ts`** (Task 2) — `requestMicStream()` (mic acquisition with
+  `echoCancellation: true`, `autoGainControl`/`noiseSuppression` off so the calibration step
+  measures a stable, uncompressed bleed signal); `PitchTracker` (loads the worklet module, wires
+  the mic source into it — **never connected to `context.destination`**, so there is no audible
+  feedback path through any open speakers — and exposes the latest reading for polling from the
+  page's existing `requestAnimationFrame` loop rather than a second timing mechanism);
+  `measureBleedFloor()` (a per-session calibration measuring the max RMS observed while the backing
+  track plays and the singer is asked to stay quiet); `hzToCents()`/`ON_PITCH_TOLERANCE_CENTS`
+  (±50 cents, a deliberately lenient, unvalidated starting tolerance); and `ScoreTracker`
+  (accumulates a running on-pitch percentage, excluding — never scoring as "off-pitch" — any frame
+  whose RMS doesn't clear the calibrated bleed floor plus `BLEED_FLOOR_MARGIN_RMS`, since an
+  excluded frame's pitch, if any, can't be attributed to the singer vs. bleed).
+- **`apps/web/app/tracks/[id]/play/page.tsx` integration** (Task 2) — an "Enable mic scoring"
+  toggle (`idle` → `requesting` → `calibrating` → `active` states, with `micError` rendered
+  additively alongside ordinary playback rather than as a dead end on denial/failure); calibration
+  is the start of playback, not a separate step, per the design spec's corrected Decision 4; a live
+  red-circle marker on the existing pitch-lane SVG once scoring is active; and a running on-pitch
+  percentage. The RAF `tick()` loop reads a `micActiveRef` ref (not the `micState` React state
+  value) to decide whether to record a scoring frame each animation frame — the same staleness
+  class M6a's own `durationSecondsRef` was introduced to solve, since `tick()`'s recursive
+  `requestAnimationFrame(tick)` call is pinned to the closure it was first scheduled from and would
+  never observe a later render's `micState` flipping from `"calibrating"` to `"active"`.
+
+`npm run lint`, `npx tsc --noEmit`, and `npm run build` all clean in `apps/web`.
+
+Live-browser-verified for mechanics: ordinary M6a playback (play/pause/seek, word highlight, pitch
+lane) confirmed unregressed; the "Enable mic scoring" button renders in its idle state; clicking it
+in this sandboxed browser environment hit `getUserMedia`'s real permission gate (mic access is
+blocked in the Browser pane's automated tooling — an environment limitation, not a bug), which
+exercised and confirmed the intended fallback path: `micError` renders "Permission denied", the mic
+flow cleanly resets to `idle` allowing retry, and ordinary playback continues completely unaffected
+— no dead end, no console errors, no side effects on the rest of the page. Because a real mic grant
+could not be obtained in this environment, the calibrating→active transition, the live-pitch marker,
+and the score-percentage readout were **not** observed live end-to-end; instead, `hzToCents`'s and
+`ScoreTracker`'s pure logic were verified directly (pasted into a live `javascript_tool` console
+session and run against fabricated readings): `hzToCents(440, 440) = 0`, `hzToCents(466.16, 440) ≈
+99.99` (a semitone), `hzToCents(880, 440) = 1200` (an octave), and a `ScoreTracker` fed 6 frames
+(one exact match, one ~20 cents sharp, one ~204 cents sharp, one below the bleed floor, one with a
+null live Hz, one with a null target Hz) correctly counted only the 3 frames with both a valid Hz
+pair and RMS above the floor, scoring 2 of those 3 as on-pitch — 66.67%, exactly as the tolerance
+and gating logic predict.
+
+**Real-world bleed survival — `docs/PLAN.md` open question 3 — remains genuinely unmeasured.**
+This is stated plainly per `CLAUDE.md`'s measurement-discipline rule: it requires a human singing
+near real speakers with a real microphone, which no automated browser session can produce. The
+mechanism this milestone built (echoCancellation, per-session calibration, RMS-floor gating) is a
+reasoned design, not a validated one. Recorded as a pending manual follow-up, not closed here: a
+person should enable mic scoring on a real device, sing along at a normal speaker volume, and
+report whether the resulting score is usable or gets swamped by bleed.
+
+Deliberately out of scope, matching the design spec's own scope decisions:
+- **Persisting scoring sessions** — `ScoreTracker`'s running percentage lives only in page state for
+  the current session; no score is written to the database or shown anywhere outside this page.
+- **The stem mixer and transposition** (M6b, still not started) — untouched by this milestone.
+- **Tuning `ON_PITCH_TOLERANCE_CENTS`/`BLEED_FLOOR_MARGIN_RMS` against real data** — both are
+  deliberately unvalidated starting points (see `apps/web/lib/micScoring.ts`'s own comments), not
+  measured constants; real tuning depends on the real bleed-survival test above.
+
 ## Done — M6a complete
 
 M6a's scope (the core synced player — read endpoint, `karaoke.json` v1 assembly and schema
@@ -740,17 +809,19 @@ findings, all fixed:
 
 ## In flight
 
-- Nothing mid-work right now. M0, M1, M2, M3, M4a, M4b, M5, and M6a are all done. M4a's measured
-  aligned-English accuracy (68.2ms median, 37.2% within 50ms) does not meet `docs/PLAN.md`'s
-  ±50ms acceptance criterion — see M4a's entry below. That decision has been made, not left
-  pending: merge M4a as engineering-complete with the gap documented, tracked as real follow-up
-  work (`docs/PLAN.md` open question 5, commit `d3ff5ff`), not a merge blocker. Real
-  authentication remains a genuine, tracked gap across the whole project — `docs/PLAN.md` open
-  question 9. M6a closed the read-path sub-question of `docs/PLAN.md` open question 10 (the
+- Nothing mid-work right now. M0, M1, M2, M3, M4a, M4b, M5, M6a, and M6c are all done. M4a's
+  measured aligned-English accuracy (68.2ms median, 37.2% within 50ms) does not meet
+  `docs/PLAN.md`'s ±50ms acceptance criterion — see M4a's entry below. That decision has been
+  made, not left pending: merge M4a as engineering-complete with the gap documented, tracked as
+  real follow-up work (`docs/PLAN.md` open question 5, commit `d3ff5ff`), not a merge blocker.
+  Real authentication remains a genuine, tracked gap across the whole project — `docs/PLAN.md`
+  open question 9. M6a closed the read-path sub-question of `docs/PLAN.md` open question 10 (the
   `GET /tracks/{id}/package` read endpoint, `karaoke.json` v1 assembly, and schema validation now
-  exist); the stem-mixer/transposition (M6b) and live-mic-pitch (M6c) parts of the original M6
-  scope remain open, along with open question 3 (live pitch detection under mic bleed), which M6c
-  owns.
+  exist). M6c built the live-mic-pitch-scoring mechanism (calibration, cents-based scoring against
+  M6a's contour) but left `docs/PLAN.md` open question 3 (real bleed survival) genuinely
+  unmeasured, pending a manual test pass with a real mic and speakers — `TODO: unmeasured`, not
+  closed. Only the stem-mixer/transposition part of the original M6 scope (M6b) remains not
+  started.
 
 ## Blocked
 
@@ -759,14 +830,15 @@ findings, all fixed:
 
 ## Next three actions
 
-1. Start M6b (stem mixer + transposition): independent volume/mute controls per stem, and
+1. Run the real manual bleed-survival test M6c's mechanism still needs: a human singing along on
+   a real device with real speakers/mic, to actually measure `docs/PLAN.md` open question 3 rather
+   than leave it `TODO: unmeasured`.
+2. Start M6b (stem mixer + transposition): independent volume/mute controls per stem, and
    key/tempo shifting via SoundTouch/Rubber Band compiled to WASM per `docs/PLAN.md`'s risk note
    on the original M6 estimate.
-2. Close `docs/PLAN.md` open question 5 (the ±50ms accuracy gap): try a larger wav2vec2 variant,
+3. Close `docs/PLAN.md` open question 5 (the ±50ms accuracy gap): try a larger wav2vec2 variant,
    check whether the separated vocal stem's audio quality degrades alignment precision versus the
    original mix, or investigate a systematic bias in the frame-to-millisecond conversion. Real work,
-   not a merge blocker, but real work that should land before M6b/M6c depend on tight timing more
-   than M6a's word-highlight already does.
-3. Push to a GitHub remote (once one exists) to get CI actually running. Also revisit
-   `docs/PLAN.md` open question 9 (real authentication) whenever a milestone's scope can actually
-   absorb it.
+   not a merge blocker. Push to a GitHub remote (once one exists) to get CI actually running, and
+   revisit `docs/PLAN.md` open question 9 (real authentication) whenever a milestone's scope can
+   actually absorb it.
