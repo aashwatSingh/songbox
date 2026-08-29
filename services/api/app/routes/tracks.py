@@ -37,6 +37,7 @@ from app.packaging import (
     StructureExtractionError,
     build_package,
 )
+from app.rate_limit import limiter
 from app.separation import SeparationError, separate_audio
 from app.storage import fetch_track_file, get_minio_client, save_track_file
 from app.transcription import (
@@ -169,8 +170,10 @@ def list_tracks(
 
 
 @router.post("/tracks/upload", response_model=UploadResponse)
+@limiter.limit("30/hour")
 def upload_track(
     request: Request,
+    response: Response,
     file: UploadFile = File(...),
     lane: str = Form(...),
     attestation_text: str = Form(...),
@@ -357,8 +360,11 @@ class SeparateResponse(BaseModel):
 
 
 @router.post("/tracks/{track_id}/separate", response_model=SeparateResponse)
+@limiter.limit("20/hour")
 def separate_track(
     track_id: uuid.UUID,
+    request: Request,
+    response: Response,
     body: SeparateRequest | None = None,
     identity: Identity = Depends(get_identity),
     db: Session = Depends(get_db),
@@ -483,8 +489,11 @@ def _transcription_to_response(transcription: Transcription) -> TranscribeRespon
 
 
 @router.post("/tracks/{track_id}/transcribe", response_model=TranscribeResponse)
+@limiter.limit("20/hour")
 def transcribe_track(
     track_id: uuid.UUID,
+    request: Request,
+    response: Response,
     body: TranscribeRequest | None = None,
     identity: Identity = Depends(get_identity),
     db: Session = Depends(get_db),
@@ -627,8 +636,11 @@ class RealignRequest(BaseModel):
 
 
 @router.post("/tracks/{track_id}/realign", response_model=TranscribeResponse)
+@limiter.limit("20/hour")
 def realign_track(
     track_id: uuid.UUID,
+    request: Request,
+    response: Response,
     body: RealignRequest,
     identity: Identity = Depends(get_identity),
     db: Session = Depends(get_db),
@@ -757,8 +769,11 @@ class PackageResponse(BaseModel):
 
 
 @router.post("/tracks/{track_id}/package", response_model=PackageResponse)
+@limiter.limit("20/hour")
 def package_track(
     track_id: uuid.UUID,
+    request: Request,
+    response: Response,
     body: PackageRequest | None = None,
     identity: Identity = Depends(get_identity),
     db: Session = Depends(get_db),

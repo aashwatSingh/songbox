@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -11,8 +11,18 @@ from app.auth import require_admin_key
 from app.db import get_admin_db
 from app.deletion import delete_track_content
 from app.models import Track
+from app.rate_limit import limiter
 
-router = APIRouter(prefix="/admin", dependencies=[Depends(require_admin_key)])
+
+@limiter.limit("10/minute")
+def _check_takedown_rate_limit(request: Request, response: Response) -> None:
+    return None
+
+
+router = APIRouter(
+    prefix="/admin",
+    dependencies=[Depends(_check_takedown_rate_limit), Depends(require_admin_key)],
+)
 
 
 class TakedownRequest(BaseModel):

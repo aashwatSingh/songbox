@@ -21,6 +21,8 @@ dependencies = [
     "torchcrepe>=0.0.23",
     "librosa>=0.10",
     "jsonschema>=4.26",
+    "slowapi>=0.1.10",
+    "redis>=5.0",
 ]
 
 [project.optional-dependencies]

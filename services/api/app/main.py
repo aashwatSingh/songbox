@@ -6,8 +6,11 @@ from collections.abc import Awaitable, Callable
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 
 from app.logging_config import configure_logging
+from app.rate_limit import limiter
 from app.routes.admin import router as admin_router
 from app.routes.review_queue import router as review_queue_router
 from app.routes.tracks import router as tracks_router
@@ -16,6 +19,12 @@ configure_logging()
 _access_logger = logging.getLogger("songbox.access")
 
 app = FastAPI(title="Songbox API")
+app.state.limiter = limiter
+# slowapi's handler is typed to accept only RateLimitExceeded, narrower than Starlette's
+# Callable[[Request, Exception], ...] contract -- a known upstream slowapi/Starlette typing
+# mismatch (the handler is registered specifically for RateLimitExceeded via the first
+# argument, so this is safe at runtime; mypy just can't see that from the signature alone).
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
 
 # Dev-only permissive CORS so the Next.js dev server (localhost:3000) can call this API
 # (localhost:8000) cross-origin. Not a production CORS policy -- tighten before any real deploy.
