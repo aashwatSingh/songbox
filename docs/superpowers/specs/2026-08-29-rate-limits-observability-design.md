@@ -22,9 +22,13 @@ Two things were verified before this design was written, not assumed:
   `runpod`) is a swappable function call, not an async queue. This matters for both milestones
   here: a rate limit on these routes directly throttles GPU spend, and a job-cost timer can wrap
   the call in place with no queue-polling machinery needed.
-- **Redis is already running** (`docker-compose.yml`, used by RQ elsewhere in this project's
-  worker infrastructure), so it's available as a rate-limit counter backend without adding new
-  infra.
+- **Redis is already running** (`docker-compose.yml`), but nothing in this codebase actually uses
+  it yet — `workers/` is an empty scaffold directory from M0, and no code anywhere imports `rq` or
+  connects to Redis; every GPU-invoking route calls its model directly in-process (see above).
+  This was checked directly, not assumed from the original spec's "Redis + RQ" framing, which
+  named an intended architecture this codebase never actually built. Redis being both running and
+  entirely unused makes it a clean, dependency-free backend for this milestone's rate-limit
+  counters — no conflict with existing usage because there is none.
 - **`config/gpu_costs.yaml` already exists** as an empty, explicitly `TODO: unmeasured` stub —
   this milestone's job-cost logging is designed to read from it, not duplicate it.
 - **Open question 9** (`docs/PLAN.md`) is still unresolved: there is no real authentication
