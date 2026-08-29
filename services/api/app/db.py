@@ -62,3 +62,21 @@ def get_db(identity: Identity = Depends(get_identity)) -> Generator[Session, Non
         raise
     finally:
         session.close()
+
+
+def get_admin_db() -> Generator[Session, None, None]:
+    """Cross-tenant session using the unrestricted `songbox` superuser role, bypassing RLS. For
+    operations that legitimately need to reach across tenants by design -- retention purge,
+    takedown -- not for anything a normal per-request endpoint should ever use. Every route that
+    depends on this MUST be gated behind something stronger than the dev-tenant-header identity
+    scheme (see app.auth.require_admin_key), since it has no tenant boundary at all.
+    """
+    session = SessionLocal()
+    try:
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()

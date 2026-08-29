@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.routes.admin import router as admin_router
 from app.routes.review_queue import router as review_queue_router
 from app.routes.tracks import router as tracks_router
 
@@ -17,6 +18,7 @@ app.add_middleware(
 
 app.include_router(tracks_router)
 app.include_router(review_queue_router)
+app.include_router(admin_router)
 
 
 @app.get("/health")

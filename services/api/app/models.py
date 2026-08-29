@@ -58,6 +58,11 @@ class Track(Base):
     # Status: pending_review|passed|rejected
     status: Mapped[str] = mapped_column(String(20), nullable=False)
     storage_key: Mapped[str] = mapped_column(Text, nullable=False)
+    # New in M7a: "taken_down" is a new value for status, alongside the existing
+    # pending_review|passed|rejected. takedown_reason/takedown_at are only ever set together, by
+    # the takedown endpoint -- both null for every other status.
+    takedown_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    takedown_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class FingerprintMatch(Base):

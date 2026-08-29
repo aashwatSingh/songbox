@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import secrets
 import uuid
 from dataclasses import dataclass
 
@@ -32,3 +34,11 @@ def get_identity(
         raise HTTPException(
             status_code=401, detail="Dev identity headers must be valid UUIDs"
         ) from exc
+
+
+def require_admin_key(x_admin_key: str | None = Header(default=None, alias="X-Admin-Key")) -> None:
+    expected = os.environ.get("ADMIN_API_KEY")
+    if not expected:
+        raise HTTPException(status_code=500, detail="admin API key not configured")
+    if not x_admin_key or not secrets.compare_digest(x_admin_key, expected):
+        raise HTTPException(status_code=401, detail="invalid or missing X-Admin-Key")
