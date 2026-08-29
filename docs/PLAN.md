@@ -201,10 +201,13 @@ milestone reaches them):
     `docs/STATUS.md`) added `GET /tracks/{id}/package`, assembling the stored columns into the
     versioned `karaoke.json` v1 shape (`services/api/app/karaoke_schema.py`) and schema-validating
     it before the player consumes it. **That sub-question is resolved** -- the endpoint exists,
-    `karaoke.json` v1 is assembled and validated on every read. What's still open is everything
-    M6b/M6c layer on top of this data (stem-mixer/transposition controls, live mic pitch scoring
-    against the pitch contour, calibration) -- none of that is a "was the read path ever built"
-    question anymore, just remaining scope tracked under M6b/M6c above.
+    `karaoke.json` v1 is assembled and validated on every read. All three M6 sub-milestones
+    (M6a, M6b, M6c) are now done -- see `docs/STATUS.md`. Open question 10 itself is now fully
+    resolved: there is no remaining "was the read path/mixer/scoring ever built" scope left
+    under this question. What's left touching this same area is tracked elsewhere, not here:
+    open question 3 (real mic bleed survival, mechanism built by M6c but genuinely unmeasured)
+    and open question 5 (the ±50ms alignment accuracy gap, which the word-highlight/pitch-lookup
+    consumers of `karaoke.json` still inherit).
 
 Resolved during this planning pass (see `docs/DECISIONS_LOG.md` for full reasoning):
 

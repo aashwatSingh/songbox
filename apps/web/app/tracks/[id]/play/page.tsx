@@ -97,6 +97,12 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
   // M6a's durationSecondsRef exists to avoid for handleTrackEnded). A ref, not React state, is
   // what tick() must read to know whether scoring is active right now.
   const micActiveRef = useRef(false);
+  // tick()'s recursive requestAnimationFrame(tick) call is pinned to the closure it was first
+  // scheduled from -- it would never see a LATER render's pitchSemitones state value if read
+  // directly. A ref, not React state, is what tick() must read to know the current key shift
+  // when computing the mic-scoring target pitch (the same staleness class micActiveRef and
+  // durationSecondsRef already exist to solve elsewhere in this file).
+  const pitchSemitonesRef = useRef(0);
 
   const [stemVolumes, setStemVolumesState] = useState<Record<keyof StemBuffers, number>>({
     drums: 1,
@@ -246,7 +252,19 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
         const newReading = tracker.getLatestReadingIfNew();
         if (micActiveRef.current && newReading && pkg) {
           const frameIndex = findActivePitchFrameIndex(pkg.karaoke.pitch.frames, nowMs);
-          const targetHz = frameIndex >= 0 ? pkg.karaoke.pitch.frames[frameIndex].hz : null;
+          const rawTargetHz = frameIndex >= 0 ? pkg.karaoke.pitch.frames[frameIndex].hz : null;
+          // The stored pitch contour is untransposed, but the singer is hearing audio shifted by
+          // the current Key setting (StemPlayer.setPitchSemitones, M6b) -- without this shift, a
+          // singer perfectly in tune with what they actually hear would be scored against the
+          // WRONG target whenever Key is non-zero, off by pitchSemitonesRef.current * 100 cents,
+          // which is larger than ScoreTracker's +-50 cent tolerance for any non-zero semitone
+          // setting. pitchSemitonesRef (not the pitchSemitones state) because tick()'s recursive
+          // requestAnimationFrame(tick) closure is pinned to whichever render scheduled it and
+          // would never see a later Key-slider change otherwise.
+          const targetHz =
+            rawTargetHz === null
+              ? null
+              : rawTargetHz * Math.pow(2, pitchSemitonesRef.current / 12);
           scoreTrackerRef.current?.recordFrame(
             newReading.hz,
             targetHz,
@@ -383,6 +401,7 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
 
   function handlePitchChange(semitones: number) {
     setPitchSemitonesState(semitones);
+    pitchSemitonesRef.current = semitones;
     playerRef.current?.setPitchSemitones(semitones);
   }
 

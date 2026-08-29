@@ -55,7 +55,22 @@ export function findActivePitchFrameIndex(
 // runtime import is deferred into init() below -- see the comment there for why.
 import type { SoundTouchNode } from "@soundtouchjs/audio-worklet";
 
+// Vendored, frozen snapshot of node_modules/@soundtouchjs/audio-worklet/.dist/soundtouch-processor.js
+// at the exact version pinned in package.json (see the comment there). If that dependency version
+// ever changes, this file must be re-copied from the new .dist/soundtouch-processor.js -- nothing
+// automatically keeps the two in sync.
 const SOUNDTOUCH_PROCESSOR_URL = "/soundtouch-processor.js";
+
+// Measured real latency the SoundTouchNode adds to the signal path -- an OfflineAudioContext
+// test (final M6b review) found ~132ms between when audio is scheduled (context.currentTime)
+// and when it's actually audible, present even at default settings (100% tempo, 0 semitones),
+// ranging ~119-151ms across different tempo/pitch settings. Not dynamically measured per-session
+// (the node's own `metrics.framesBuffered` could do this more precisely, but that's asynchronous
+// event-driven data, not available synchronously inside a getter) -- this is a fixed, honestly-
+// approximate correction, not a precise one. Subtracted once here so every consumer of
+// currentTimeSeconds (word highlighting, the pitch-lane playhead, M6c's mic-scoring target
+// lookup) benefits automatically without needing to know the worklet has latency at all.
+const SOUNDTOUCH_LATENCY_SECONDS = 0.132;
 
 // Fixed iteration/indexing order for the three stems -- used both when constructing fresh
 // source/gain nodes in play() and when looking up which gain node a mixer change should apply to.
@@ -156,7 +171,11 @@ export class StemPlayer {
 
   pause(): void {
     this.stopSources();
-    this.startedAtOffsetSeconds = this.currentTimeSeconds;
+    // Re-anchor to the RAW (uncompensated) scheduled position, not the public currentTimeSeconds
+    // getter -- see rawScheduledPositionSeconds()'s comment for why. Using the compensated value
+    // here would make the eventual resume's play(offsetSeconds) call start the source reading
+    // ~132ms earlier than where it actually stopped, audibly replaying audio already heard.
+    this.startedAtOffsetSeconds = this.rawScheduledPositionSeconds();
     this.playing = false;
   }
 
@@ -184,7 +203,14 @@ export class StemPlayer {
   // AudioParam on an already-running node.
   setTempo(multiplier: number): void {
     if (this.playing) {
-      const currentPosition = this.currentTimeSeconds;
+      // Re-anchor against the RAW (uncompensated) position -- see rawScheduledPositionSeconds()'s
+      // comment. Re-anchoring against the public, already-compensated currentTimeSeconds here
+      // would subtract SOUNDTOUCH_LATENCY_SECONDS a second time on top of the getter's own
+      // subtraction on every subsequent read, permanently shifting the tracked position another
+      // ~132ms behind the true audible position on every tempo change -- compounding without bound
+      // across repeated drags of the Tempo slider, since each call's anchor is itself already
+      // over-corrected from the previous call.
+      const currentPosition = this.rawScheduledPositionSeconds();
       this.tempoMultiplier = multiplier;
       this.startedAtOffsetSeconds = currentPosition;
       this.startedAtContextTime = this.context.currentTime;
@@ -206,7 +232,14 @@ export class StemPlayer {
     }
   }
 
-  get currentTimeSeconds(): number {
+  // The playhead position on the RAW, uncompensated "scheduled" timeline -- i.e. the sample
+  // position the underlying AudioBufferSourceNodes are currently set to read from, matching
+  // exactly what play()'s own offsetSeconds/source.start(0, offsetSeconds) call means. This is
+  // the correct quantity for internal re-anchoring (pause()'s resume offset, setTempo()'s live
+  // re-anchor): re-anchoring against the public currentTimeSeconds getter below (which subtracts
+  // SOUNDTOUCH_LATENCY_SECONDS) would double-subtract the latency constant on every such call --
+  // see pause()'s and setTempo()'s comments for the concrete failure this would cause.
+  private rawScheduledPositionSeconds(): number {
     if (!this.playing) {
       return this.startedAtOffsetSeconds;
     }
@@ -214,6 +247,30 @@ export class StemPlayer {
       this.startedAtOffsetSeconds +
       (this.context.currentTime - this.startedAtContextTime) * this.tempoMultiplier
     );
+  }
+
+  get currentTimeSeconds(): number {
+    if (!this.playing) {
+      // Deliberately NOT latency-compensated -- this returns the same RAW value
+      // rawScheduledPositionSeconds() would, because pause() (below) stores the raw position
+      // here specifically so that handlePlayPause's resume call (`player.play(player
+      // .currentTimeSeconds)` in page.tsx) restarts playback from the exact sample the source
+      // nodes had reached, not from ~132ms earlier -- which would otherwise replay audio already
+      // heard. Nothing in this codebase reads currentTimeSeconds while paused for any OTHER
+      // purpose (the RAF display loop is cancelled on pause, so the UI's last-shown value is
+      // whatever the compensated playing-branch below produced on the final frame before pause,
+      // not a fresh paused-state read) -- if a future caller ever needs a compensated value while
+      // paused, add a distinct accessor rather than compensating this branch, which would silently
+      // reintroduce the resume-rewind bug this comment describes.
+      return this.startedAtOffsetSeconds;
+    }
+    // Clamped so a position within the first ~132ms of playback reads as 0 rather than negative
+    // -- downstream consumers (word/pitch-frame lookups, the displayed playhead) don't expect a
+    // negative time. Compensation is applied exactly once, here -- the only place any caller
+    // should read a latency-compensated value from. Internal re-anchoring uses
+    // rawScheduledPositionSeconds() above instead, precisely to keep this a single, un-compounded
+    // subtraction no matter how many times pause()/setTempo() run.
+    return Math.max(0, this.rawScheduledPositionSeconds() - SOUNDTOUCH_LATENCY_SECONDS);
   }
 
   get isPlaying(): boolean {

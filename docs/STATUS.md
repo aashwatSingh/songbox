@@ -31,7 +31,7 @@ What was built:
   user already touched via the UI before ever clicking Play — otherwise those settings would exist
   only in React state with nothing to apply them to until the next render.
 
-`npx tsc --noEmit` clean in `apps/web`.
+`npm run build`, `npm run lint`, and `npx tsc --noEmit` all clean in `apps/web`.
 
 Live-browser-verified against real running servers (a real generated 8-second test package, since
 this track's synthetic stems have no lyric words — `words: []` — but do have a full-length pitch
@@ -976,6 +976,7 @@ findings, all fixed:
 2. Close `docs/PLAN.md` open question 5 (the ±50ms accuracy gap): try a larger wav2vec2 variant,
    check whether the separated vocal stem's audio quality degrades alignment precision versus the
    original mix, or investigate a systematic bias in the frame-to-millisecond conversion. Real work,
-   not a merge blocker. Push to a GitHub remote (once one exists) to get CI actually running, and
+   not a merge blocker.
+3. Configure a GitHub remote so `.github/workflows/ci.yml` actually runs (see "Blocked" above), and
    revisit `docs/PLAN.md` open question 9 (real authentication) whenever a milestone's scope can
    actually absorb it.
