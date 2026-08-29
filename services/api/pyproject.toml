@@ -23,6 +23,7 @@ dependencies = [
     "jsonschema>=4.26",
     "slowapi>=0.1.10",
     "redis>=5.0",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -57,7 +58,7 @@ strict = true
 [[tool.mypy.overrides]]
 # torchaudio, faster-whisper, and soundfile ship no py.typed marker / stubs (unlike torch and
 # demucs, which do) -- this is a third-party packaging gap, not something app code can fix.
-module = ["torchaudio.*", "faster_whisper.*", "soundfile.*", "torchcrepe.*", "librosa.*", "jsonschema.*"]
+module = ["torchaudio.*", "faster_whisper.*", "soundfile.*", "torchcrepe.*", "librosa.*", "jsonschema.*", "yaml"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

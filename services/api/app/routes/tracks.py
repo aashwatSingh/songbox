@@ -20,6 +20,7 @@ from app.db import get_db
 from app.fingerprint import FingerprintError, fingerprint_audio
 from app.gate import resolve_lane_outcome, resolve_lyrics_display_allowed
 from app.gpu_backend import BackendBusyError, BackendTimeoutError, run_inference
+from app.job_cost import track_job_cost
 from app.karaoke_schema import KARAOKE_SCHEMA_V1
 from app.models import (
     FingerprintMatch,
@@ -403,19 +404,20 @@ def separate_track(
         tmp.flush()
         tmp.close()
 
-        try:
-            stem_paths = run_inference(
-                lambda: separate_audio(Path(tmp.name), model_name=model_name),
-                timeout_seconds=SEPARATION_TIMEOUT_SECONDS,
-            )
-        except BackendBusyError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-        except BackendTimeoutError as exc:
-            raise HTTPException(status_code=504, detail=str(exc)) from exc
-        except SeparationError as exc:
-            raise HTTPException(
-                status_code=422, detail=f"could not separate audio: {exc}"
-            ) from exc
+        with track_job_cost(track.id, "separate"):
+            try:
+                stem_paths = run_inference(
+                    lambda: separate_audio(Path(tmp.name), model_name=model_name),
+                    timeout_seconds=SEPARATION_TIMEOUT_SECONDS,
+                )
+            except BackendBusyError as exc:
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
+            except BackendTimeoutError as exc:
+                raise HTTPException(status_code=504, detail=str(exc)) from exc
+            except SeparationError as exc:
+                raise HTTPException(
+                    status_code=422, detail=f"could not separate audio: {exc}"
+                ) from exc
     finally:
         Path(tmp.name).unlink(missing_ok=True)
 
@@ -538,27 +540,28 @@ def transcribe_track(
         tmp.write(vocal_bytes)
         tmp.flush()
         tmp.close()
-        try:
-            result = run_inference(
-                lambda: run_transcription_and_alignment(Path(tmp.name), model_size=model_size),
-                timeout_seconds=TRANSCRIPTION_TIMEOUT_SECONDS,
-            )
-        except BackendBusyError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-        except BackendTimeoutError as exc:
-            raise HTTPException(status_code=504, detail=str(exc)) from exc
-        except TranscriptionError as exc:
-            raise HTTPException(
-                status_code=422, detail=f"could not transcribe audio: {exc}"
-            ) from exc
-        except AlignmentError as exc:
-            # Deliberately NOT interpolating `exc` into the response -- CLAUDE.md forbids
-            # logging raw lyrics, and an alignment failure can legitimately occur mid-transcript,
-            # so its message must never be trusted to be content-free by construction the way
-            # TranscriptionError's failures (which occur before any text exists) are.
-            raise HTTPException(
-                status_code=422, detail="could not align transcript to audio"
-            ) from exc
+        with track_job_cost(track.id, "transcribe"):
+            try:
+                result = run_inference(
+                    lambda: run_transcription_and_alignment(Path(tmp.name), model_size=model_size),
+                    timeout_seconds=TRANSCRIPTION_TIMEOUT_SECONDS,
+                )
+            except BackendBusyError as exc:
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
+            except BackendTimeoutError as exc:
+                raise HTTPException(status_code=504, detail=str(exc)) from exc
+            except TranscriptionError as exc:
+                raise HTTPException(
+                    status_code=422, detail=f"could not transcribe audio: {exc}"
+                ) from exc
+            except AlignmentError as exc:
+                # Deliberately NOT interpolating `exc` into the response -- CLAUDE.md forbids
+                # logging raw lyrics. An alignment failure can occur mid-transcript, so its
+                # message must never be trusted to be content-free by construction the way
+                # TranscriptionError's failures (which occur before any text exists) are.
+                raise HTTPException(
+                    status_code=422, detail="could not align transcript to audio"
+                ) from exc
     finally:
         Path(tmp.name).unlink(missing_ok=True)
 
@@ -701,20 +704,21 @@ def realign_track(
         tmp.write(vocal_bytes)
         tmp.flush()
         tmp.close()
-        try:
-            words = run_inference(
-                lambda: align_words(Path(tmp.name), body.text),
-                timeout_seconds=TRANSCRIPTION_TIMEOUT_SECONDS,
-            )
-        except BackendBusyError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-        except BackendTimeoutError as exc:
-            raise HTTPException(status_code=504, detail=str(exc)) from exc
-        except AlignmentError as exc:
-            # Deliberately NOT interpolating `exc` -- same reasoning as /transcribe's mapping.
-            raise HTTPException(
-                status_code=422, detail="could not align transcript to audio"
-            ) from exc
+        with track_job_cost(track.id, "realign"):
+            try:
+                words = run_inference(
+                    lambda: align_words(Path(tmp.name), body.text),
+                    timeout_seconds=TRANSCRIPTION_TIMEOUT_SECONDS,
+                )
+            except BackendBusyError as exc:
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
+            except BackendTimeoutError as exc:
+                raise HTTPException(status_code=504, detail=str(exc)) from exc
+            except AlignmentError as exc:
+                # Deliberately NOT interpolating `exc` -- same reasoning as /transcribe's mapping.
+                raise HTTPException(
+                    status_code=422, detail="could not align transcript to audio"
+                ) from exc
     finally:
         Path(tmp.name).unlink(missing_ok=True)
 
@@ -830,25 +834,26 @@ def package_track(
             tmp.close()
             tmp_paths[stem_type] = Path(tmp.name)
 
-        try:
-            result = run_inference(
-                lambda: build_package(
-                    vocals_path=tmp_paths["vocals"],
-                    drums_path=tmp_paths["drums"],
-                    bass_path=tmp_paths["bass"],
-                    other_path=tmp_paths["other"],
-                    pitch_model=pitch_model,
-                ),
-                timeout_seconds=PACKAGE_TIMEOUT_SECONDS,
-            )
-        except BackendBusyError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-        except BackendTimeoutError as exc:
-            raise HTTPException(status_code=504, detail=str(exc)) from exc
-        except (AccompanimentError, PitchExtractionError, StructureExtractionError) as exc:
-            raise HTTPException(
-                status_code=422, detail="could not package track"
-            ) from exc
+        with track_job_cost(track.id, "package"):
+            try:
+                result = run_inference(
+                    lambda: build_package(
+                        vocals_path=tmp_paths["vocals"],
+                        drums_path=tmp_paths["drums"],
+                        bass_path=tmp_paths["bass"],
+                        other_path=tmp_paths["other"],
+                        pitch_model=pitch_model,
+                    ),
+                    timeout_seconds=PACKAGE_TIMEOUT_SECONDS,
+                )
+            except BackendBusyError as exc:
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
+            except BackendTimeoutError as exc:
+                raise HTTPException(status_code=504, detail=str(exc)) from exc
+            except (AccompanimentError, PitchExtractionError, StructureExtractionError) as exc:
+                raise HTTPException(
+                    status_code=422, detail="could not package track"
+                ) from exc
     finally:
         for path in tmp_paths.values():
             path.unlink(missing_ok=True)
