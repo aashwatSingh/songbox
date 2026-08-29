@@ -1,6 +1,85 @@
 # Status
 
-Last updated: 2026-08-28.
+Last updated: 2026-08-29.
+
+## Done — M7a complete
+
+M7a's scope (`docs/superpowers/specs/2026-08-28-retention-takedown-design.md`: retention purge and
+an admin-gated takedown endpoint, the "find and delete a track's data" half of `docs/PLAN.md`'s M7)
+is built and verified end to end, across three tasks plus this final-review fix round:
+
+What was built:
+- **`services/api/app/deletion.py`'s `delete_track_content(session, track)`** — a shared deletion
+  core reused by both features: deletes every row and object-storage blob a track owns
+  (`FingerprintMatch`, `Stem` rows + their MinIO objects, `Transcription`, `KaraokePackage`, the
+  original upload's MinIO object), leaving the `Track` row and its `RightsDeclaration` for the
+  caller to handle, since retention purge (hard delete) and takedown (tombstone) want different
+  endings.
+- **`services/api/scripts/purge_expired_tracks.py`** — a standalone script (no in-process scheduler
+  exists in this project) that hard-deletes tracks whose `status` is still `pending_review` or
+  `rejected` — i.e. never passed the rights gate — older than `RETENTION_WINDOW_DAYS = 30`, a
+  stated policy choice, not a measured or compliance-reviewed number. Must be invoked as `cd
+  services/api && python -m scripts.purge_expired_tracks` — **not** `python
+  scripts/purge_expired_tracks.py`, which cannot import `app.*` in this environment (no in-process
+  scheduler is wired to run this automatically; an operator or an external OS-level scheduled task
+  must trigger it).
+- **`POST /admin/tracks/{track_id}/takedown`** (`services/api/app/routes/admin.py`) — gated by a
+  new `X-Admin-Key` header (`app/auth.py`'s `require_admin_key`, constant-time comparison via
+  `secrets.compare_digest`, fail-closed 500 if `ADMIN_API_KEY` is unset), tombstones a track
+  (`status="taken_down"`, `takedown_reason`, `takedown_at`) while removing its content via the same
+  `delete_track_content()` core. **A new required environment variable, `ADMIN_API_KEY`, is not
+  present in `docker-compose.yml` or any `.env.example`** — an operator must set it themselves
+  before this endpoint will accept any request at all.
+
+118 tests pass; `ruff check .` and `mypy app` (strict) both clean in `services/api`.
+
+A final whole-branch review found 8 real issues, all fixed in one pass:
+- **The merge blocker — an orphaned-data correctness gap.** `confirm-attestation`'s "stronger
+  attestation" `RightsDeclaration` row (Lane A holds) is deliberately never repointed at by
+  `Track.rights_declaration_id` (see the comment in `confirm_attestation()`), which meant
+  `purge_expired_tracks()` had no way to find it — it carries `attestation_text`/`user_id`/
+  `ip_address` and was orphaned forever once its track was purged, in a milestone whose entire
+  purpose is deleting exactly this kind of data. Fixed with a new, additive migration (`0008`)
+  adding a nullable `RightsDeclaration.track_id` column, set only on supplementary declarations
+  like this one; the purge script now finds and deletes them (before the `Track` row, since this FK
+  points the opposite direction from the original declaration) alongside the original.
+- **`require_admin_key` crashed with 500 on a non-ASCII `X-Admin-Key` header** — Starlette decodes
+  headers as latin-1, and `secrets.compare_digest` raises `TypeError` on a non-ASCII `str`. Fixed by
+  comparing `.encode()`d bytes instead of `str`.
+- **The admin router's auth gate was attached per-route, not per-router** — `router =
+  APIRouter(prefix="/admin", dependencies=[Depends(require_admin_key)])` now gates by construction,
+  so any future route added to this file is safe by default; the external path
+  (`/admin/tracks/{track_id}/takedown`) is unchanged.
+- **No test covered a takedown of a nonexistent track.** Added
+  `test_takedown_404s_for_unknown_track` to `test_admin_takedown.py`, with the same
+  non-invocation-guard pattern the file's other negative-path tests use.
+- **Docs-only — the purge script's docstring didn't state its real invocation command**, and
+  documenting it as every sibling script in `docs/BENCHMARKS.md` is documented
+  (`python scripts/<name>.py`) actually fails. Fixed with an explicit `Run as:` line.
+- **Docs-only — no STATUS.md entry for this milestone.** This entry.
+- **Minor — `app/deletion.py` didn't state that object-storage deletes aren't transactional with
+  the DB.** MinIO object deletion happens before the caller's transaction commits, so a later commit
+  failure rolls back the DB rows but not the already-deleted storage objects — the correct
+  fail-safe direction for a deletion feature, now stated explicitly in the docstring.
+- **Minor — the purge script's docstring didn't state that the whole sweep runs in one
+  transaction.** A failure partway through a run rolls back all prior deletions in that run (while
+  their already-removed MinIO objects stay removed), and a very large backlog means one long-held
+  transaction — noted as a known characteristic at current scale, not fixed here.
+
+**A known, honest limitation, not a bug to fix in this milestone:** the takedown endpoint records
+*why* and *when* a track was taken down, but not *who* performed it. `X-Admin-Key` is a single
+shared static key (Decision 4 of the design spec) — there is no per-actor identity or audit log
+behind it, only the same coarse yes/no gate every caller shares.
+
+Deliberately out of scope, matching the design spec's own scope decisions:
+- **Rate limits and observability** (M7b) and **the cloud GPU backend swap + real no-egress sandbox
+  validation + load test** (M7c) — the other two M7 sub-milestones.
+- **Real production scheduling for the purge script** (a hosted cron, a scheduled serverless
+  function) — deferred until this project has real deployment infrastructure at all.
+- **Notifying a track's owner that their content was taken down** — a real product feature, not
+  built here.
+- **Retention policy for `passed` tracks or inactive accounts** — no real account-lifecycle
+  infrastructure exists to hang that policy on yet.
 
 ## Done — M6b complete
 

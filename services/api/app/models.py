@@ -41,6 +41,14 @@ class RightsDeclaration(Base):
     pd_cc_source: Mapped[str | None] = mapped_column(Text, nullable=True)
     pd_cc_license: Mapped[str | None] = mapped_column(Text, nullable=True)
     attribution_string: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Set only on supplementary declarations created after the original (e.g. the "stronger
+    # attestation" row confirm-attestation creates) -- links them back to their track so the
+    # retention purge script can find and delete them too. The original declaration a track is
+    # created with is reachable the other way, via Track.rights_declaration_id, and leaves this
+    # column null.
+    track_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tracks.id"), nullable=True
+    )
 
 
 class Track(Base):

@@ -40,5 +40,5 @@ def require_admin_key(x_admin_key: str | None = Header(default=None, alias="X-Ad
     expected = os.environ.get("ADMIN_API_KEY")
     if not expected:
         raise HTTPException(status_code=500, detail="admin API key not configured")
-    if not x_admin_key or not secrets.compare_digest(x_admin_key, expected):
+    if not x_admin_key or not secrets.compare_digest(x_admin_key.encode(), expected.encode()):
         raise HTTPException(status_code=401, detail="invalid or missing X-Admin-Key")

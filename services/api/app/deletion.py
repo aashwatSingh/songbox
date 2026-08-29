@@ -17,6 +17,12 @@ def delete_track_content(session: Session, track: Track) -> None:
     (those pipeline stages only run after the rights gate passes) -- for them, these queries are
     cheap no-ops, not dead code. Reusing one function for both cases is simpler than maintaining
     two purpose-built deletion paths that would drift apart over time.
+
+    MinIO object deletion happens here, before the caller's transaction commits -- so if that
+    commit later fails, the DB rows roll back but the already-deleted storage objects do not come
+    back. This is the correct fail-safe direction for a deletion feature (content-gone is the
+    compliance goal), but it means storage and DB state can diverge on a failure; stated here
+    rather than left implicit.
     """
     minio_client = get_minio_client()
 

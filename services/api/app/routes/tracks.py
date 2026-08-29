@@ -335,6 +335,7 @@ def confirm_attestation(
         ip_address=request.client.host if request.client else "unknown",
         created_at=datetime.now(UTC),
         release_name=body.release_name,
+        track_id=track.id,
     )
     db.add(stronger)
 

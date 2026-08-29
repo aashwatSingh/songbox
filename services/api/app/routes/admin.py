@@ -12,7 +12,7 @@ from app.db import get_admin_db
 from app.deletion import delete_track_content
 from app.models import Track
 
-router = APIRouter()
+router = APIRouter(prefix="/admin", dependencies=[Depends(require_admin_key)])
 
 
 class TakedownRequest(BaseModel):
@@ -27,9 +27,8 @@ class TakedownResponse(BaseModel):
 
 
 @router.post(
-    "/admin/tracks/{track_id}/takedown",
+    "/tracks/{track_id}/takedown",
     response_model=TakedownResponse,
-    dependencies=[Depends(require_admin_key)],
 )
 def takedown_track(
     track_id: uuid.UUID,

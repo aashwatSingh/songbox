@@ -105,6 +105,23 @@ def test_takedown_fails_closed_when_admin_key_not_configured(
     assert response.status_code == 500
 
 
+def test_takedown_404s_for_unknown_track(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ADMIN_API_KEY", TEST_ADMIN_KEY)
+
+    def _fail_if_called(*args: object, **kwargs: object) -> object:
+        raise AssertionError("delete_track_content must not be called for an unknown track")
+
+    monkeypatch.setattr("app.routes.admin.delete_track_content", _fail_if_called)
+
+    response = client.post(
+        f"/admin/tracks/{uuid.uuid4()}/takedown",
+        json={"reason": "test"},
+        headers={"X-Admin-Key": TEST_ADMIN_KEY},
+    )
+
+    assert response.status_code == 404
+
+
 def test_takedown_creates_tombstone_and_removes_content_across_tenants(
     monkeypatch: pytest.MonkeyPatch, synthetic_wav: Path
 ) -> None:
