@@ -71,7 +71,7 @@ choice in code comments, exactly like `RETENTION_WINDOW_DAYS` was in M7a), not a
 from load data. Revisiting them with real numbers is explicitly future work (M7c's load test is
 the first point real traffic-shaped data will exist).
 
-**Exceeding a limit** returns HTTP `429` with slowapi's default `Retry-After` header. Every 429 is
+**Exceeding a limit** returns HTTP `429` with a `Retry-After` header (`Limiter(..., headers_enabled=True)` — this is opt-in, not slowapi's default). Every 429 is
 also captured by Decision 2's request logging, so real abuse patterns are visible in logs even
 before any specific limit is retuned.
 
