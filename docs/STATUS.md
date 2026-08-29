@@ -104,6 +104,27 @@ start` production server on `/tracks/{id}/play` returned `200 OK` (was `500`); a
 browser navigation showed no error; the Mixer/Transpose feature itself was re-confirmed working
 after the fix (Play, Tempo change, Key change, zero console errors).
 
+**The final whole-branch review found two more real, cross-cutting bugs, both fixed in a
+subsequent round:**
+1. **`SoundTouchNode` adds ~132ms of unconditional playback latency** (measured via a real
+   `OfflineAudioContext` test against the vendored worklet processor, present even at default
+   settings) — `StemPlayer.currentTimeSeconds` reflected when audio was *scheduled*
+   (`context.currentTime`), not when it was actually *heard*, silently leading word highlighting,
+   the pitch-lane playhead, and M6c's mic-scoring target lookup by that amount. Fixed by
+   subtracting a measured `SOUNDTOUCH_LATENCY_SECONDS = 0.132` constant once, inside
+   `currentTimeSeconds`'s getter, so every consumer benefits automatically. The fix round caught
+   and corrected a real bug in the review's own literal suggested code along the way: naively
+   re-anchoring `pause()`/`setTempo()` against the newly-compensated public getter (rather than an
+   internal uncompensated value) would have caused a permanent, compounding ~132ms position drift
+   on every tempo change and an audible rewind on every pause/resume — independently verified
+   (both the bug and the fix) by executing the real compiled class against a controlled fake clock
+   and a real browser `AudioContext`.
+2. **Mic-scoring's target pitch was never transposed** — a non-zero Key setting shifted the
+   audible backing track but not the stored contour `tick()` compared the singer's live pitch
+   against, so any Key ≠ 0 scored a perfectly in-tune singer near 0%. Fixed by multiplying the
+   target Hz by `2^(pitchSemitones/12)` before scoring, read from a ref (not React state) for the
+   same closure-staleness reason `micActiveRef`/`durationSecondsRef` already exist in this file.
+
 Deliberately out of scope, matching the design spec's own scope decisions:
 - **Persisting mixer/transpose settings** across page loads or sessions — both live only in this
   page's React state for the current session, same as M6c's `ScoreTracker` percentage.
