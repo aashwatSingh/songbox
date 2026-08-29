@@ -147,3 +147,27 @@ def test_upload_request_log_never_leaks_track_content(
         "client_ip",
     }
     assert logged_extra_keys == expected_keys
+
+
+def test_unhandled_exception_still_logs_a_request_line(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from app.auth import get_identity
+
+    def _broken_identity() -> None:
+        raise ValueError("simulated crash")
+
+    app.dependency_overrides[get_identity] = _broken_identity
+    broken_client = TestClient(app, raise_server_exceptions=False)
+    try:
+        with caplog.at_level(logging.INFO, logger="songbox.access"):
+            response = broken_client.get(
+                "/tracks", headers={"X-Dev-Tenant-Id": "test", "X-Dev-User-Id": "test"}
+            )
+    finally:
+        app.dependency_overrides.pop(get_identity, None)
+
+    assert response.status_code == 500
+    access_records = [r for r in caplog.records if r.name == "songbox.access"]
+    assert len(access_records) == 1
+    assert access_records[0].status_code == 500  # type: ignore[attr-defined]
