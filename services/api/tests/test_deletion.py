@@ -12,7 +12,7 @@ from app.acoustid.client import FixtureAcoustIDClient
 from app.db import SessionLocal, db_session_for_tenant
 from app.deletion import delete_track_content
 from app.main import app
-from app.models import KaraokePackage, Stem, Track, Transcription
+from app.models import FingerprintMatch, KaraokePackage, Stem, Track, Transcription
 from app.routes.tracks import get_acoustid_client
 from app.storage import fetch_track_file, get_minio_client
 
@@ -100,6 +100,10 @@ def test_delete_track_content_removes_rows_and_storage_but_not_the_track(
         assert len(stems) == 4
         stem_keys = [s.storage_key for s in stems]
         track_key = track.storage_key
+        fingerprint_matches = session.execute(
+            select(FingerprintMatch).where(FingerprintMatch.track_id == track.id)
+        ).scalars().all()
+        assert len(fingerprint_matches) >= 1
         # Confirm the real objects exist before deletion (fetch raises if missing).
         for key in [*stem_keys, track_key]:
             fetch_track_file(minio_client, key)
@@ -121,6 +125,9 @@ def test_delete_track_content_removes_rows_and_storage_but_not_the_track(
         ).scalars().all() == []
         assert session.execute(
             select(KaraokePackage).where(KaraokePackage.track_id == track.id)
+        ).scalars().all() == []
+        assert session.execute(
+            select(FingerprintMatch).where(FingerprintMatch.track_id == track.id)
         ).scalars().all() == []
 
         for key in [*stem_keys, track_key]:
