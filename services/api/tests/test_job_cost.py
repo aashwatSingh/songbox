@@ -131,3 +131,43 @@ def test_separate_endpoint_logs_a_real_gpu_job_cost_line(
     assert job_records[0].job_type == "separate"  # type: ignore[attr-defined]
     assert job_records[0].duration_seconds > 0  # type: ignore[attr-defined]
     assert job_records[0].estimated_cost_usd is None  # type: ignore[attr-defined]
+
+
+def test_track_job_cost_degrades_to_null_cost_if_pricing_lookup_fails(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    def _broken_estimate(duration_seconds: float) -> float | None:
+        raise KeyError("price_per_second_usd")
+
+    monkeypatch.setattr("app.job_cost.estimate_cost_usd", _broken_estimate)
+
+    track_id = uuid.uuid4()
+    # NOTE: intentionally logging.INFO here, not logging.WARNING -- caplog.at_level(level, logger=X)
+    # raises X's own effective level to `level`, so passing WARNING would suppress the INFO
+    # "gpu_job" record before it's even created, making the info_records assertion below fail
+    # unconditionally regardless of what track_job_cost actually does. INFO is low enough to let
+    # both the INFO and WARNING records through to caplog.
+    with caplog.at_level(logging.INFO, logger="songbox.job_cost"):
+        with track_job_cost(track_id, "separate"):
+            pass
+
+    info_records = [
+        r for r in caplog.records if r.name == "songbox.job_cost" and r.levelno == logging.INFO
+    ]
+    assert len(info_records) == 1
+    assert info_records[0].estimated_cost_usd is None  # type: ignore[attr-defined]
+    warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warning_records) == 1
+
+
+def test_track_job_cost_pricing_failure_does_not_mask_the_original_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _broken_estimate(duration_seconds: float) -> float | None:
+        raise KeyError("price_per_second_usd")
+
+    monkeypatch.setattr("app.job_cost.estimate_cost_usd", _broken_estimate)
+
+    with pytest.raises(ValueError, match="original failure"):
+        with track_job_cost(uuid.uuid4(), "transcribe"):
+            raise ValueError("original failure")

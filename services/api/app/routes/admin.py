@@ -16,6 +16,14 @@ from app.rate_limit import limiter
 
 @limiter.limit("10/minute")
 def _check_takedown_rate_limit(request: Request, response: Response) -> None:
+    # With app/rate_limit.py's key_style="endpoint", this counter is scoped to this dependency
+    # FUNCTION itself, not to whichever route pulls it in as a dependency. That's deliberate here
+    # (it's what makes the takedown limit apply per-IP regardless of track_id -- see rate_limit.py's
+    # comment), but it also means if a second admin route is ever added reusing this exact
+    # dependency, it would share this one 10/minute bucket with the takedown route rather than
+    # getting its own independent limit. A conservative default, not a bug -- give a future
+    # sibling route its own `@limiter.limit(...)`-decorated dependency function if it needs an
+    # independent bucket.
     return None
 
 

@@ -26,6 +26,8 @@ class JSONFormatter(logging.Formatter):
             "logger": record.name,
             "message": record.getMessage(),
         }
+        if record.exc_info:
+            payload["exception"] = self.formatException(record.exc_info)
         for key, value in vars(record).items():
             if key not in _STANDARD_LOGRECORD_KEYS:
                 payload[key] = value

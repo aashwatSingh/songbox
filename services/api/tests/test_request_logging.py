@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 import uuid
 
 import pytest
@@ -171,3 +172,22 @@ def test_unhandled_exception_still_logs_a_request_line(
     access_records = [r for r in caplog.records if r.name == "songbox.access"]
     assert len(access_records) == 1
     assert access_records[0].status_code == 500  # type: ignore[attr-defined]
+
+
+def test_json_formatter_includes_traceback_when_exc_info_present() -> None:
+    try:
+        raise ValueError("boom")
+    except ValueError:
+        record = logging.LogRecord(
+            name="songbox.access",
+            level=logging.ERROR,
+            pathname=__file__,
+            lineno=1,
+            msg="failed",
+            args=(),
+            exc_info=sys.exc_info(),
+        )
+
+    payload = json.loads(JSONFormatter().format(record))
+    assert "ValueError: boom" in payload["exception"]
+    assert "Traceback" in payload["exception"]

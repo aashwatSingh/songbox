@@ -2,6 +2,84 @@
 
 Last updated: 2026-08-29.
 
+## Done — M7b complete
+
+M7b's scope (`docs/superpowers/specs/2026-08-29-rate-limits-observability-design.md`: per-IP rate
+limiting, structured JSON request logging, and GPU job cost logging — the "rate limits + observability"
+third of `docs/PLAN.md`'s M7, alongside M7a's retention/takedown and M7c's cloud GPU backend swap) is
+built and verified end to end, across three tasks plus this final-review fix round:
+
+What was built:
+- **Structured JSON request logging** (`services/api/app/logging_config.py`'s `JSONFormatter` +
+  `configure_logging()`, wired into a request-timing middleware in `app/main.py`) — one JSON log line
+  per request (`method`, `path`, `status_code`, `duration_ms`, `tenant_id`, `client_ip`), never track
+  content, per `CLAUDE.md`'s "never log raw audio, lyrics, or signed URLs" rule.
+- **Per-IP rate limiting** (`slowapi` + Redis, `services/api/app/rate_limit.py`) on 5 routes:
+  `POST /tracks/upload` (30/hour), the four GPU-costing routes `/separate`/`/transcribe`/`/realign`/
+  `/package` (20/hour each), and `POST /admin/tracks/{id}/takedown` (10/minute, wired as a
+  dependency ordered *before* `require_admin_key` so it throttles wrong-key brute-force attempts too,
+  not just successful calls). Numbers are stated policy, not measured/tuned — there's no real traffic
+  yet to tune against.
+- **GPU job cost logging** (`services/api/app/job_cost.py`'s `track_job_cost` context manager, wrapping
+  the four GPU-invoking route handlers' inference calls) — logs real measured `duration_seconds` and an
+  `estimated_cost_usd` read from `config/gpu_costs.yaml`'s `providers` list, `null` until that stub is
+  ever populated with real pricing (`CLAUDE.md`'s "no fabricated... figure" rule).
+
+**New required environment variable: `REDIS_URL`** (defaults to `redis://localhost:6379`, matching the
+`docker-compose.yml` Redis service already running for this project — nothing else in this codebase
+used Redis before this milestone). This is now a **hard dependency for the entire test suite**, not
+just the rate-limiting tests: `services/api/tests/conftest.py` has a new `autouse` fixture
+(`_reset_rate_limits`) that calls `limiter.reset()` against the real Redis-backed counters before
+*every* test, so the whole suite fails to even collect cleanly without a real running Redis instance.
+CI's `api` job (`.github/workflows/ci.yml`) now starts a `redis:7-alpine` service alongside the
+existing `postgres` one for exactly this reason.
+
+**The final whole-branch review's fix round found one merge-blocking bug and three other real issues,
+all fixed in one pass:**
+- **Critical, the merge blocker — every rate limit was trivially bypassable.** `Limiter(...)` never set
+  `key_style`, which defaults to `"url"` in the real installed `slowapi` package — this scopes each
+  counter to the *literal* request path, including the `track_id` UUID embedded in it (e.g.
+  `/tracks/<uuid>/separate`). Varying the `track_id` across requests gave each one its own fresh
+  bucket, defeating every rate limit in this milestone, including the takedown endpoint's brute-force
+  protection (M7a's whole reason for existing). Fixed with `key_style="endpoint"` on the `Limiter`
+  constructor, which scopes each counter to the view/dependency function instead of the literal path.
+  Two regression tests were added driving 21/11 requests with a *different* `track_id` each time
+  (the exact coverage gap that let this ship — every prior test reused one fixed `fake_track_id`) —
+  confirmed genuinely RED against the unfixed code (`assert 404 == 429`, `assert 401 == 429` on the
+  final request) and GREEN after the fix.
+- **Important — a GPU cost-lookup failure could turn a successful GPU job into a 500, or mask a real
+  error.** `track_job_cost`'s `finally:` block called `estimate_cost_usd(...)` with no error handling;
+  a missing `config/gpu_costs.yaml` or a malformed provider entry would crash `finally`, which could
+  either 500 an otherwise-successful job or, if an `HTTPException` was already propagating through the
+  `with` block, silently replace it with the cost-lookup crash. Fixed: the lookup is now wrapped so a
+  pricing-data problem degrades to a `null` cost plus a `songbox.job_cost` warning log, never an
+  exception — an observability shim must never change the outcome of the thing it's observing.
+- **Important — `_GPU_COSTS_PATH`'s positional `parents[3]` path walk was fragile off the source
+  tree.** Now overridable via an optional `GPU_COSTS_PATH` environment variable, falling back to the
+  same positional walk when unset.
+- **Important — `JSONFormatter` silently dropped tracebacks.** It's installed as the root logger's
+  handler for the whole app, but never read `record.exc_info` — so any future `logger.exception(...)`
+  call anywhere in the app (including third-party libraries like `slowapi`, which calls
+  `self.logger.exception(...)` internally) would silently lose its traceback. Fixed to include a
+  `formatException(record.exc_info)`-derived `exception` field whenever `exc_info` is present.
+
+**Reverse-proxy caveat, recorded in `app/rate_limit.py`'s own comment for whenever this runs behind a
+real proxy/load balancer (not yet — M7c):** uvicorn's default `proxy_headers=True` with
+`forwarded_allow_ips` defaulting to `"127.0.0.1"` means `request.client.host` (what
+`get_remote_address` reads) becomes the *proxy's* address for every request once a proxy is
+introduced, silently turning every "per-IP" limit here into one shared global limit — and making the
+access-log `client_ip` field constant and useless. Set `FORWARDED_ALLOW_IPS` to the proxy's real
+address when that day comes.
+
+Deliberately out of scope, matching the design spec's own scope decisions:
+- **Load testing and retuning the rate-limit numbers with real traffic data** — M7c, the first point
+  real traffic-shaped data will exist.
+- **A `/metrics` Prometheus endpoint** — nothing in this project's infrastructure consumes one yet.
+- **Populating real GPU provider pricing into `config/gpu_costs.yaml`** — a data-entry task requiring
+  real provider quotes, not an engineering task this milestone can do.
+- **Solving `docs/PLAN.md` open question 9 (real auth)** — this milestone's per-IP keying is an
+  explicit, honest workaround, not a resolution.
+
 ## Done — M7a complete
 
 M7a's scope (`docs/superpowers/specs/2026-08-28-retention-takedown-design.md`: retention purge and

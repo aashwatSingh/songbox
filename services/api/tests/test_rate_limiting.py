@@ -18,9 +18,13 @@ HEADERS = {
 
 
 def _random_test_ip() -> str:
-    # A fresh, effectively-unique IP per test -- Redis-backed rate-limit state persists across
-    # test runs (there is no flush fixture), so each test needs its own bucket to stay isolated.
-    # Same reasoning this codebase's other tests use fresh random UUIDs for tenant isolation.
+    # conftest.py's autouse `_reset_rate_limits` fixture already resets ALL limiter state before
+    # every test, so this isn't covering for a missing flush. A fresh, effectively-unique IP per
+    # test still earns its keep independently of that reset: it keeps each test's bucket
+    # genuinely private (no risk of two tests racing the same key if run in parallel, and no
+    # cross-test coupling if the reset fixture is ever narrowed or removed), and it makes each
+    # test self-contained and readable on its own, the same reasoning this codebase's other tests
+    # use fresh random UUIDs for tenant isolation.
     return f"10.{random.randint(0, 255)}.{random.randint(0, 255)}.{random.randint(0, 255)}"
 
 
@@ -151,3 +155,39 @@ def test_unlimited_route_never_rate_limits() -> None:
     for _ in range(50):
         response = client.get("/tracks", headers=HEADERS)
         assert response.status_code == 200
+
+
+def test_separate_rate_limit_is_scoped_to_the_endpoint_not_the_literal_path() -> None:
+    # Regression test for a real bug found in final review: slowapi's key_style defaults to
+    # "url", scoping the counter to the literal request path -- including the track_id in it.
+    # Without key_style="endpoint" on the Limiter, varying the track_id across requests would
+    # give each one its own fresh 20/hour bucket, making the limit trivially bypassable. This
+    # drives 21 requests with 21 DIFFERENT track_ids from the same IP and confirms the 21st
+    # still 429s -- proving the limit is genuinely scoped per-endpoint, not per-path.
+    client = TestClient(app, client=(_random_test_ip(), 1))
+
+    responses = [
+        client.post(f"/tracks/{uuid.uuid4()}/separate", headers=HEADERS) for _ in range(21)
+    ]
+
+    assert [r.status_code for r in responses[:20]] == [404] * 20
+    assert responses[20].status_code == 429
+
+
+def test_takedown_rate_limit_is_scoped_to_the_endpoint_not_the_literal_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ADMIN_API_KEY", "the-real-key-for-this-test")
+    client = TestClient(app, client=(_random_test_ip(), 1))
+
+    responses = [
+        client.post(
+            f"/admin/tracks/{uuid.uuid4()}/takedown",
+            json={"reason": "test"},
+            headers={"X-Admin-Key": "definitely-the-wrong-key"},
+        )
+        for _ in range(11)
+    ]
+
+    assert [r.status_code for r in responses[:10]] == [401] * 10
+    assert responses[10].status_code == 429

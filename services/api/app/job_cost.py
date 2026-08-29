@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -9,7 +10,18 @@ from pathlib import Path
 
 import yaml
 
-_GPU_COSTS_PATH = Path(__file__).resolve().parents[3] / "config" / "gpu_costs.yaml"
+# Overridable via GPU_COSTS_PATH -- the positional parents[3] walk (services/api/app/job_cost.py
+# -> app/ -> api/ -> services/ -> repo root) only holds up in a source checkout. It would break
+# silently under e.g. a non-editable install where this file lands in site-packages/. A broken
+# path now safely degrades to a null cost (see track_job_cost's exception handling below) rather
+# than crashing, but it should still be overridable and documented rather than a bare positional
+# walk.
+_GPU_COSTS_PATH = Path(
+    os.environ.get(
+        "GPU_COSTS_PATH",
+        str(Path(__file__).resolve().parents[3] / "config" / "gpu_costs.yaml"),
+    )
+)
 _job_cost_logger = logging.getLogger("songbox.job_cost")
 
 
@@ -48,19 +60,26 @@ def track_job_cost(track_id: object, job_type: str) -> Iterator[None]:
     since the duration up to a failure is still real and worth recording (retries/failures are
     exactly the kind of waste this exists to give visibility into). Never logs anything about the
     track's content -- only its opaque id, the job type, real measured duration, and an estimated
-    cost that is `null` until real GPU pricing data exists.
+    cost that is `null` until real GPU pricing data exists. A pricing-lookup failure (a malformed
+    or missing gpu_costs.yaml) degrades to a null cost plus a warning -- it must never turn a
+    completed GPU job into a 500, or mask an HTTPException already propagating through this block.
     """
     start = time.monotonic()
     try:
         yield
     finally:
         duration_seconds = time.monotonic() - start
+        try:
+            cost = estimate_cost_usd(duration_seconds)
+        except Exception:
+            _job_cost_logger.warning("gpu_cost_lookup_failed", exc_info=True)
+            cost = None
         _job_cost_logger.info(
             "gpu_job",
             extra={
                 "track_id": str(track_id),
                 "job_type": job_type,
                 "duration_seconds": round(duration_seconds, 3),
-                "estimated_cost_usd": estimate_cost_usd(duration_seconds),
+                "estimated_cost_usd": cost,
             },
         )
