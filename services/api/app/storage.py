@@ -38,3 +38,10 @@ def fetch_track_file(client: Minio, storage_key: str) -> bytes:
     finally:
         response.close()
         response.release_conn()
+
+
+def delete_track_file(client: Minio, storage_key: str) -> None:
+    """Removes an object from storage. MinIO's remove_object follows standard S3 idempotent-
+    delete semantics -- it does not raise if the object is already gone, so callers don't need to
+    guard against a double-delete or a storage_key that was never actually uploaded."""
+    client.remove_object(_BUCKET, storage_key)
