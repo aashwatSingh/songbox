@@ -100,12 +100,26 @@ Decision 2, distinguishable by a `job_type` field) with: `track_id`, `job_type` 
 `"transcribe"` | `"realign"` | `"package"`), `duration_seconds` (real, measured via
 `time.monotonic()`), and `estimated_cost_usd`.
 
-`estimated_cost_usd` is computed by looking up the active GPU backend's price-per-second from
-`config/gpu_costs.yaml` and multiplying by `duration_seconds` — but that file's `providers: []` is
-still empty (a `TODO: unmeasured` stub, per its own header comment, unpopulated until someone has
-real provider pricing). While it's empty, `estimated_cost_usd` is logged as `null`, never a
-fabricated number. This directly feeds open question 4 ("cost per track end-to-end") the moment
-real pricing data lands — no code change needed then, just populating the YAML file.
+**Checked directly, not assumed:** there is no GPU-backend-selection concept anywhere in this
+codebase today. `app/gpu_backend.py`'s `run_inference()` — the single call site every one of these
+four routes goes through — is ADR-0001's `local` backend outright, hardcoded (a process-wide lock
+plus a wall-clock timeout on the caller's own machine); the `modal`/`runpod` implementation doesn't
+exist yet (that's M7c's job). Since `local` execution runs on the developer's own machine, it has
+no real per-second billing to attach a number to, regardless of what `config/gpu_costs.yaml`
+contains. So `estimated_cost_usd` is computed by a standalone lookup — `job_cost.py`'s
+`estimate_cost_usd(duration_seconds: float) -> float | None` — that reads
+`config/gpu_costs.yaml`'s `providers` list, picks the entry with the most recent
+`effective_date` not in the future (the yaml's own header comment already establishes dated,
+non-overwritten entries as its convention), multiplies `price_per_second_usd * duration_seconds`,
+and returns `None` if `providers` is empty. It has no backend parameter and doesn't need one: this
+project only ever has one meaningfully "active" price at a time (there's no concurrent multi-backend
+operation), so the lookup is "whatever the most recent populated entry says," independent of which
+code path actually ran the job. Today, with `providers: []` still empty (a `TODO: unmeasured` stub,
+per its own header comment), every call returns `None`, logged as `estimated_cost_usd: null` —
+never a fabricated number, regardless of which route or backend produced the duration. This
+directly feeds open question 4 ("cost per track end-to-end") the moment real pricing data lands —
+no code change needed then, just populating the YAML file (and, later, M7c wiring an actual
+`modal`/`runpod` backend that this same lookup would apply to unchanged).
 
 This is entirely additive around the existing synchronous call sites — no change to what
 `separate`/`transcribe`/`realign`/`package` actually do, just a timer wrapped around the existing
