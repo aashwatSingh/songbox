@@ -113,7 +113,7 @@ def run_separate(
     its own (possibly-patched) reference down explicitly instead.
     """
     if _active_backend() == "modal":
-        raise NotImplementedError("modal backend not yet implemented -- see M7c Task 3")
+        return _run_separate_modal(audio_bytes, model_name=model_name)
     return _run_separate_local(
         audio_bytes,
         model_name=model_name,
@@ -154,6 +154,17 @@ def _run_separate_local(
         Path(tmp.name).unlink(missing_ok=True)
 
 
+def _run_separate_modal(audio_bytes: bytes, *, model_name: str) -> dict[str, bytes]:
+    import modal
+    import modal.exception
+
+    fn = modal.Function.from_name("songbox-gpu", "run_separate")
+    try:
+        return fn.remote(audio_bytes, model_name)  # type: ignore[no-any-return]
+    except modal.exception.FunctionTimeoutError as exc:
+        raise BackendTimeoutError(str(exc)) from exc
+
+
 def run_transcribe(
     audio_bytes: bytes,
     *,
@@ -166,7 +177,7 @@ def run_transcribe(
     `app.routes.tracks.run_transcription_and_alignment` patches (one of which supplies a fake
     result outright, which only works if the patched callable is the one actually invoked)."""
     if _active_backend() == "modal":
-        raise NotImplementedError("modal backend not yet implemented -- see M7c Task 3")
+        return _run_transcribe_modal(audio_bytes, model_size=model_size)
 
     if run_transcription_and_alignment_fn is not None:
         fn = run_transcription_and_alignment_fn
@@ -189,6 +200,17 @@ def run_transcribe(
         Path(tmp.name).unlink(missing_ok=True)
 
 
+def _run_transcribe_modal(audio_bytes: bytes, *, model_size: str) -> TranscriptionResult:
+    import modal
+    import modal.exception
+
+    fn = modal.Function.from_name("songbox-gpu", "run_transcribe")
+    try:
+        return fn.remote(audio_bytes, model_size)  # type: ignore[no-any-return]
+    except modal.exception.FunctionTimeoutError as exc:
+        raise BackendTimeoutError(str(exc)) from exc
+
+
 def run_realign(
     audio_bytes: bytes,
     *,
@@ -199,7 +221,7 @@ def run_realign(
     """See run_separate()'s docstring for why `align_words_fn` exists -- same reasoning, this
     time for tests/test_tracks_realign.py's `app.routes.tracks.align_words` patches."""
     if _active_backend() == "modal":
-        raise NotImplementedError("modal backend not yet implemented -- see M7c Task 3")
+        return _run_realign_modal(audio_bytes, text=text)
 
     if align_words_fn is not None:
         fn = align_words_fn
@@ -221,6 +243,17 @@ def run_realign(
         Path(tmp.name).unlink(missing_ok=True)
 
 
+def _run_realign_modal(audio_bytes: bytes, *, text: str) -> list[Word]:
+    import modal
+    import modal.exception
+
+    fn = modal.Function.from_name("songbox-gpu", "run_realign")
+    try:
+        return fn.remote(audio_bytes, text)  # type: ignore[no-any-return]
+    except modal.exception.FunctionTimeoutError as exc:
+        raise BackendTimeoutError(str(exc)) from exc
+
+
 def run_package(
     vocals_bytes: bytes,
     drums_bytes: bytes,
@@ -234,7 +267,9 @@ def run_package(
     """See run_separate()'s docstring for why `build_package_fn` exists -- same reasoning, this
     time for tests/test_tracks_package.py's `app.routes.tracks.build_package` patches."""
     if _active_backend() == "modal":
-        raise NotImplementedError("modal backend not yet implemented -- see M7c Task 3")
+        return _run_package_modal(
+            vocals_bytes, drums_bytes, bass_bytes, other_bytes, pitch_model=pitch_model
+        )
 
     if build_package_fn is not None:
         fn = build_package_fn
@@ -271,3 +306,21 @@ def run_package(
     finally:
         for path in tmp_paths.values():
             path.unlink(missing_ok=True)
+
+
+def _run_package_modal(
+    vocals_bytes: bytes,
+    drums_bytes: bytes,
+    bass_bytes: bytes,
+    other_bytes: bytes,
+    *,
+    pitch_model: str,
+) -> PackageResult:
+    import modal
+    import modal.exception
+
+    fn = modal.Function.from_name("songbox-gpu", "run_package")
+    try:
+        return fn.remote(vocals_bytes, drums_bytes, bass_bytes, other_bytes, pitch_model)  # type: ignore[no-any-return]
+    except modal.exception.FunctionTimeoutError as exc:
+        raise BackendTimeoutError(str(exc)) from exc
