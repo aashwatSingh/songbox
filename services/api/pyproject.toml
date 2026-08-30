@@ -35,6 +35,9 @@ dev = [
 eval = [
     "datasets>=2.14",
 ]
+modal = [
+    "modal>=1.5",
+]
 
 [tool.setuptools]
 # alembic/ has real .py files (env.py, versions/*.py) but is Alembic's own convention, not a
