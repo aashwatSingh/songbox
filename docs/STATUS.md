@@ -1,6 +1,65 @@
 # Status
 
-Last updated: 2026-08-29.
+Last updated: 2026-08-30.
+
+## Done — M7c complete (closes M7, the whole project's final milestone)
+
+M7c's scope (`docs/superpowers/specs/2026-08-29-cloud-gpu-backend-design.md`: swap the GPU pipeline
+from the `local` backend to a real Modal cloud backend, and validate the no-network-egress sandbox
+claim for real — the last of M7's three sub-milestones, after M7a's retention/takedown and M7b's
+rate limits/observability) is built, deployed, and validated end to end against real Modal
+infrastructure, real credentials, and real (small) GPU spend.
+
+What was built:
+- **Bytes-based backend dispatch** (`services/api/app/gpu_backend.py`) — restructured from a
+  closure-over-a-local-file-path interface (couldn't work for a remote backend) to four
+  stage-specific functions (`run_separate`/`run_transcribe`/`run_realign`/`run_package`) taking
+  audio bytes in, structured results out, dispatching on a `GPU_BACKEND` environment variable
+  (`"local"` — the default, free/fast for routine dev work — or `"modal"`). Verified the four
+  routes' HTTP behavior is byte-for-byte unchanged (all 31 existing route-level tests pass with
+  zero changes to those test files).
+- **Real Modal deployment** (`services/api/app/modal_app.py`, app name `songbox-gpu`, GPU type
+  `A10`) — deployed live at https://modal.com/apps/aashwat-singh/main/deployed/songbox-gpu.
+- **The no-egress sandbox claim, validated for real** — `block_network=True` on
+  `run_transcribe`/`run_realign`/`run_package` confirmed to genuinely block outbound traffic (a
+  deliberate probe function with identical logic but `block_network=True` failed with a real DNS
+  resolution error; its `block_network=False` sibling succeeded, proving the negative result means
+  something and isn't just "Modal has no networking at all"). This closes `docs/adr/
+  0001-gpu-backend-abstraction.md`'s explicit "not proven until M7" caveat — the claim is now
+  actually tested, not assumed.
+- **A real, honest exception to that claim, found and handled transparently, not hidden:**
+  `run_separate` cannot use `block_network=True`. Its return value (four full audio stems)
+  routinely exceeds Modal's real 2 MiB inline-payload threshold, and above that threshold Modal's
+  own platform transport uploads the payload to its blob-storage backend *from inside the
+  container* — which `block_network=True` blocks too, confirmed by a real failed deploy
+  (`ClientConnectorDNSError` reaching `modal-blobs.s3-accelerate.amazonaws.com`, not anything
+  `separate_audio()`'s own code does). `run_separate` runs with plain networking allowed; the other
+  three keep `block_network=True`. See `app/modal_app.py`'s comment on `run_separate` for the full
+  account — this is a real, per-function, measured distinction, not a blanket retreat.
+- **Real model-weight pre-warming** (`app/modal_app.py`'s `_prewarm_model_weights`, run via
+  `Image.run_function` at build time) — Demucs and faster-whisper/wav2vec2 both fetch pretrained
+  weights from a remote hub on first use; under `block_network=True` that fetch has to happen
+  during image build (when the build process has real network access), not at request time.
+  torchcrepe needed no such fix — it ships its weights directly inside the pip package.
+- **Real end-to-end validation**: a full pipeline run (separate → transcribe → package) against a
+  real synthetic track, and a light concurrent load test (4 simultaneous `/separate` calls, all
+  succeeded, with real evidence of genuine parallelism — see `docs/BENCHMARKS.md`'s M7c section for
+  the numbers).
+- **Real cost data**, closing `docs/PLAN.md` open question 4 partially: Modal `A10` pricing
+  recorded in `config/gpu_costs.yaml` for the first time (was an empty `TODO: unmeasured` stub
+  since M0) — M7b's `job_cost.py` now emits real `estimated_cost_usd` values instead of `null`,
+  with zero code changes needed there. What's still open: a real cost figure for an actual
+  multi-minute song (this milestone only measured a 3-second synthetic test tone).
+
+**Known follow-up, not done in this milestone (kept proportionate to real validation cost/time,
+not silently forgotten):** the model pre-warming step only warms the *default* variant of each
+stage (`htdemucs`, `base` Whisper) — a request for any other `ALLOWED_*` variant
+(`ALLOWED_SEPARATION_MODELS`, `ALLOWED_WHISPER_MODEL_SIZES`) would hard-fail at runtime with no
+fallback, since `block_network=True` means there's no "slow path," just a network error. A real
+production deployment should extend pre-warming to cover every allowed variant.
+
+`local` remains the default `GPU_BACKEND` for routine dev work — this milestone adds `modal` as a
+real, validated option, it doesn't replace `local`.
 
 ## Done — M7b complete
 

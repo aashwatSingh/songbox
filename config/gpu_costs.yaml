@@ -1,8 +1,9 @@
 # Dated GPU price table. Every job's cost accounting (spec §9) reads from this file — never
 # hardcode a price inline. Add a new dated entry when a provider changes pricing; don't overwrite
 # old entries, so historical job costs stay reproducible.
-#
-# TODO: unmeasured — no real pricing entries yet. Populate this before M3 benchmarking and again
-# before M7 when the Modal/RunPod backend goes live (see docs/adr/0001-gpu-backend-abstraction.md).
 
-providers: []
+providers:
+  - name: modal
+    gpu_type: A10
+    price_per_second_usd: 0.000306
+    effective_date: "2026-08-30"

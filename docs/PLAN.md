@@ -167,8 +167,13 @@ milestone reaches them):
    calibrated floor) but has NOT measured real bleed survival -- that needs a human singing near
    real speakers, which no automated agent session can produce. Still open pending that manual
    test pass; `TODO: unmeasured`.
-4. Cost per track end-to-end, at what GPU instance size, and where that puts the price floor. Only
-   answerable once M7's real cloud backend is wired up and benchmarked — `TODO: unmeasured` until then.
+4. **Partially resolved in M7c.** GPU instance size: Modal `A10`, $0.000306/second (real, current
+   pricing — `config/gpu_costs.yaml`). Real measured cost for a full pipeline run (a 3-second
+   synthetic test track, not a real song): ≈$0.0134 — see `docs/BENCHMARKS.md`'s M7c section for
+   the real per-stage timings and the light load test's concurrency evidence. What remains open:
+   a real cost-per-track figure for an actual multi-minute song, since Demucs/Whisper/CREPE
+   processing time scales with track length and this milestone only measured a 3-second synthetic
+   tone — `TODO: unmeasured` until a real-length track is run through the same deployment.
 5. **New in M4a.** Alignment accuracy is 68.2ms median (37.2% within 50ms), missing the ±50ms target —
    what closes the gap? Candidates, none yet tried: a larger wav2vec2 variant
    (`WAV2VEC2_ASR_LARGE_LV60K_960H`), checking whether the separated vocal stem's audio quality

@@ -195,3 +195,51 @@ oscillator has) or about bleed survival (`docs/PLAN.md` open question 3, `apps/w
 micScoring.ts`'s calibration/RMS-floor-gate mechanism). Both remain `TODO: unmeasured` — closing
 them needs a real human voice and, for bleed, a real room with real speakers and a real microphone,
 per this milestone's design spec and `docs/STATUS.md`'s M6c entry.
+
+## M7c: Cloud GPU backend (Modal), real cost-per-track
+
+Measured on: 2026-08-30, against the real deployed `songbox-gpu` Modal app (`services/api/app/
+modal_app.py`), GPU type `A10` ($0.000306/second per `modal.com/pricing`, recorded in
+`config/gpu_costs.yaml`). This is the first real measurement of production GPU cost this project
+has ever had — every prior milestone's timing numbers (M3/M4/M5/M6c above) were measured against
+the `local` CPU backend and explicitly marked not representative of Modal/RunPod production timing.
+
+**Real, measured durations** (a single 3-second synthetic sine-tone test track, full pipeline via
+`GPU_BACKEND=modal`):
+
+| Stage | Duration | Real output |
+|---|---|---|
+| `/separate` | 13.8s | 4 real stems (vocals/drums/bass/other) |
+| `/transcribe` | 8.9s | `language=en` (real faster-whisper + wav2vec2 output) |
+| `/package` | 21.1s | `tempo_bpm=139.67` (real torchcrepe + librosa output) |
+
+**Cost for that one full-pipeline run:** (13.8 + 8.9 + 21.1) × $0.000306/s ≈ **$0.0134**.
+
+**Light load test** (per the approved scope — 3-5 real concurrent jobs, not a production-scale
+test): 4 concurrent `/separate` calls against 4 distinct synthetic tracks, all succeeded (200).
+Individual durations: 9.5s, 4.3s, 5.8s, 2.5s (sum: 22.1s of real GPU-compute-seconds, cost ≈
+$0.0068 for this batch) — but the whole batch's **wall-clock** was only 9.5s, matching the single
+slowest job rather than the sum of all four. This is real, direct evidence of genuine concurrency:
+Modal's containers run independently in parallel, unlike the `local` backend's single
+process-wide lock, which serializes every job onto one machine.
+
+**What this measures, and what it does not:** these numbers are for a 3-second synthetic test
+tone, not a real multi-minute song — Demucs/Whisper/CREPE processing time scales with track
+length, so this is not a representative "cost per real track" figure, and this document will not
+claim one until a real multi-minute track is actually measured. What these numbers *do* establish,
+for the first time with real data: the pipeline genuinely works end-to-end on Modal's
+infrastructure, genuinely runs multiple jobs in parallel, and costs a small fraction of a cent per
+GPU-second — closing `docs/PLAN.md` open question 4's "cost per track" question is now blocked
+only on running a real-length track through this same real deployment, not on any remaining
+engineering work.
+
+**A real architectural finding from this validation pass, not a hypothetical:** `run_separate`
+cannot use `block_network=True` the way the other three pipeline functions do. Its return value
+(four full-length audio stems) routinely exceeds Modal's real, documented 2 MiB inline-payload
+threshold, and payloads above that threshold are transported through Modal's own blob-storage
+backend — from inside the function's container, which `block_network=True` blocks (confirmed by a
+real failed deploy: a genuine `ClientConnectorDNSError` reaching
+`modal-blobs.s3-accelerate.amazonaws.com` from inside the container, not from `separate_audio()`'s
+own code, which never makes a network call of its own). `run_transcribe`/`run_realign`/
+`run_package` return small structured data well under 2 MiB and keep `block_network=True`. See
+`app/modal_app.py`'s comment on `run_separate` for the full account.
