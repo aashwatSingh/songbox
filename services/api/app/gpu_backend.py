@@ -316,11 +316,47 @@ def _run_package_modal(
     *,
     pitch_model: str,
 ) -> PackageResult:
+    """Unpacks the compact dict app.modal_app's run_package Function actually returns -- it does
+    NOT return a PackageResult directly. Final whole-branch review measured a real PackageResult's
+    pickled size at this project's own 12-minute MAX_DURATION_SECONDS cap: 2.67 MiB, over Modal's
+    real 2 MiB inline-payload threshold (the exact failure mode run_separate was fixed for,
+    documented in app/modal_app.py's run_separate comment -- see that comment for the full
+    mechanism). run_package's Modal Function instead struct-packs the pitch contour as three
+    parallel arrays (measured: 0.83 MiB at 12 minutes), which this function reassembles into a
+    real PackageResult so every OTHER caller in this codebase keeps working with the same type
+    build_package() has always returned.
+    """
+    import math
+    import struct
+
     import modal
     import modal.exception
 
+    from app.packaging import PackageResult, PitchFrame
+
     fn = modal.Function.from_name("songbox-gpu", "run_package")
     try:
-        return fn.remote(vocals_bytes, drums_bytes, bass_bytes, other_bytes, pitch_model)  # type: ignore[no-any-return]
+        raw = fn.remote(vocals_bytes, drums_bytes, bass_bytes, other_bytes, pitch_model)
     except modal.exception.FunctionTimeoutError as exc:
         raise BackendTimeoutError(str(exc)) from exc
+
+    n = raw["pitch_frame_count"]
+    unpacked = struct.unpack(f"<{n}I{n}f{n}f", raw["pitch_bytes"])
+    time_ms_values = unpacked[:n]
+    hz_values = unpacked[n : 2 * n]
+    confidence_values = unpacked[2 * n : 3 * n]
+    pitch = [
+        PitchFrame(
+            time_ms=t,
+            hz=None if math.isnan(h) else h,
+            confidence=c,
+        )
+        for t, h, c in zip(time_ms_values, hz_values, confidence_values, strict=True)
+    ]
+    return PackageResult(
+        pitch_model=raw["pitch_model"],
+        pitch=pitch,
+        tempo_bpm=raw["tempo_bpm"],
+        beats_ms=raw["beats_ms"],
+        sections_ms=raw["sections_ms"],
+    )

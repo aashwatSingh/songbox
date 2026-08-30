@@ -36,6 +36,36 @@ What was built:
   `separate_audio()`'s own code does). `run_separate` runs with plain networking allowed; the other
   three keep `block_network=True`. See `app/modal_app.py`'s comment on `run_separate` for the full
   account — this is a real, per-function, measured distinction, not a blanket retreat.
+- **The same near-miss, caught before shipping, not after:** final whole-branch review measured
+  `run_package`'s real pitch-contour payload at this project's own 12-minute `MAX_DURATION_SECONDS`
+  cap and found it crosses the identical 2 MiB threshold (2.67 MiB) — the same bug class, just
+  never triggered by the milestone's 3-second synthetic test track. Unlike `run_separate`, this one
+  was fixed rather than conceded: the Modal Function now struct-packs the pitch contour as three
+  parallel byte arrays instead of a `list[PitchFrame]` of dataclass instances (measured: 0.83 MiB
+  at 12 minutes), and `gpu_backend.py` unpacks it back into a real `PackageResult` — no other
+  caller in the codebase ever sees the compact wire format. `run_package` keeps
+  `block_network=True`.
+- **A real cost-safety backstop that didn't exist before this review pass:** the `local` backend's
+  process-wide lock structurally capped this project at one inference job at a time; Modal has no
+  equivalent unless told to, and per-IP rate limits (M7b) bound one caller, not total spend across
+  every caller. `_MAX_CONTAINERS = 5` now caps concurrent instances per pipeline function, matching
+  the concurrency this milestone's own load test actually validated.
+- **Domain-exception marshaling verified for real, not assumed:** a route handler's
+  `except SeparationError` (→ 422) only works under `GPU_BACKEND=modal` if `SeparationError`
+  survives Modal's remote-call exception marshaling as the same Python class, not a generic
+  wrapper. Verified directly: calling the deployed `run_separate` with deliberately invalid bytes
+  raised a real, locally-catchable `SeparationError` with a real message. The sibling domain
+  exceptions (`TranscriptionError`, `AlignmentError`, `AccompanimentError`, `PitchExtractionError`,
+  `StructureExtractionError`) were not each individually verified the same way — structurally
+  identical classes imported identically on both sides make the same mechanism a reasonable
+  inference, not five separate confirmations. A genuinely malformed (format-valid-but-broken, not
+  garbage) test file exercising this through the full route layer end to end remains open —
+  `docs/adr/0001-gpu-backend-abstraction.md`'s M7c update section states this precisely.
+- **A small, honest, non-blocking finding surfaced while verifying the above:** the deployed
+  image has no `ffmpeg` installed. Demucs's audio loader tries a Rust-based decoder (`sphn`) first
+  and falls back to `ffmpeg` for formats it can't handle; every real WAV file this milestone's
+  validation used loaded fine via `sphn` alone, so this hasn't blocked anything observed so far,
+  but it's a real gap in the fallback path, not verified safe for every accepted format.
 - **Real model-weight pre-warming** (`app/modal_app.py`'s `_prewarm_model_weights`, run via
   `Image.run_function` at build time) — Demucs and faster-whisper/wav2vec2 both fetch pretrained
   weights from a remote hub on first use; under `block_network=True` that fetch has to happen
@@ -50,13 +80,30 @@ What was built:
   since M0) — M7b's `job_cost.py` now emits real `estimated_cost_usd` values instead of `null`,
   with zero code changes needed there. What's still open: a real cost figure for an actual
   multi-minute song (this milestone only measured a 3-second synthetic test tone).
+- **The container-isolation properties this project doesn't configure itself, stated honestly
+  rather than left silent:** Modal's real, documented runtime is gVisor-based (Google's
+  application-kernel container isolation, also used by Cloud Run), which provides seccomp
+  filtering, dropped capabilities, and a read-only root filesystem platform-wide for every Modal
+  Function — not as something this project turns on per-function, and not independently
+  re-verified against this specific deployment (there's no per-function knob to check). This is
+  Modal's stated architecture, not an unchecked assumption, but it's worth naming as a distinct
+  claim from the network-egress properties this project *did* directly measure.
+
+**Test safety note:** `tests/test_modal_sandbox_validation.py` (the two tests that call the real
+deployed app) requires an explicit `SONGBOX_MODAL_LIVE_TESTS=1` opt-in, not just credential
+presence — a plain `pytest` invocation on a machine with `modal setup` already run does NOT make
+real billable calls by default.
 
 **Known follow-up, not done in this milestone (kept proportionate to real validation cost/time,
 not silently forgotten):** the model pre-warming step only warms the *default* variant of each
-stage (`htdemucs`, `base` Whisper) — a request for any other `ALLOWED_*` variant
-(`ALLOWED_SEPARATION_MODELS`, `ALLOWED_WHISPER_MODEL_SIZES`) would hard-fail at runtime with no
-fallback, since `block_network=True` means there's no "slow path," just a network error. A real
-production deployment should extend pre-warming to cover every allowed variant.
+stage (`htdemucs`, `base` Whisper). The consequence of requesting a non-pre-warmed variant differs
+by stage, and is stated precisely rather than as one blanket claim: `run_transcribe` keeps
+`block_network=True`, so a non-pre-warmed `ALLOWED_WHISPER_MODEL_SIZES` value hard-fails at
+runtime with no fallback. `run_separate` does not have `block_network=True`, so the one
+non-pre-warmed `ALLOWED_SEPARATION_MODELS` value (`"htdemucs_ft"`) currently *succeeds*, just
+slowly, by downloading those weights live on every cold container — a real, client-influenced (if
+narrowly-scoped) network fetch, not a failure. A real production deployment should extend
+pre-warming to cover every allowed variant either way.
 
 `local` remains the default `GPU_BACKEND` for routine dev work — this milestone adds `modal` as a
 real, validated option, it doesn't replace `local`.

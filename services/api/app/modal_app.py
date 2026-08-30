@@ -3,16 +3,22 @@
     modal deploy services/api/app/modal_app.py
 
 after `modal setup` (or setting MODAL_TOKEN_ID/MODAL_TOKEN_SECRET) has configured real
-credentials -- this file cannot be deployed or tested without them. The four real pipeline
-functions (run_separate/run_transcribe/run_realign/run_package) are decorated with
-block_network=True: none of them need network access, since the caller (this project's FastAPI
-backend) already fetches audio bytes from MinIO before calling any of these, and each function
-returns its result directly through Modal's own call/response marshaling rather than writing
-anywhere reachable over a network. This is a stronger guarantee than the original spec's "no
-egress except object storage and the queue" wording assumed was necessary (see the M7c design
-spec's Decision 2) -- zero egress, not restricted egress. Two more functions, egress_probe and
-blocked_egress_probe, exist purely to validate that block_network is genuinely enforced (not just
-declared) -- see their own docstrings.
+credentials -- this file cannot be deployed or tested without them. None of the four real
+pipeline functions (run_separate/run_transcribe/run_realign/run_package) need network access on
+their own merits, since the caller (this project's FastAPI backend) already fetches audio bytes
+from MinIO before calling any of these, and each function returns its result through Modal's own
+call/response marshaling rather than writing anywhere reachable over a network. This was the
+intended "zero egress, not restricted egress" guarantee from the M7c design spec's Decision 2 --
+but real validation against real infrastructure found it only holds for THREE of the four:
+run_transcribe/run_realign/run_package keep block_network=True. run_separate does not -- see its
+own docstring for why (Modal's own platform transport for a large return value needs network from
+inside the container, a real platform constraint, not anything separate_audio()'s own code does).
+run_package came within a hair of the same fate: its pitch contour data crosses Modal's real 2 MiB
+inline-payload threshold at this project's own 12-minute MAX_DURATION_SECONDS cap, and keeps
+block_network=True only because its return value was restructured into a compact packed-bytes
+format -- see its own docstring. Two more functions, egress_probe and blocked_egress_probe, exist
+purely to validate that block_network is genuinely enforced (not just declared) -- see their own
+docstrings.
 
 GPU: "A10" (Modal's real name -- not AWS's "A10G"), $0.000306/second per modal.com/pricing as of
 this file's authoring. Sized for this pipeline's model sizes (Demucs, faster-whisper, wav2vec2,
@@ -26,7 +32,6 @@ from typing import TYPE_CHECKING
 import modal
 
 if TYPE_CHECKING:
-    from app.packaging import PackageResult
     from app.transcription import TranscriptionResult, Word
 
 def _prewarm_model_weights() -> None:
@@ -44,10 +49,20 @@ def _prewarm_model_weights() -> None:
     -- matching DEFAULT_WHISPER_MODEL_SIZE in app/routes/tracks.py -- and the one wav2vec2
     bundle), which is what this milestone's real validation run actually exercises. A real
     production deployment should extend this to cover every ALLOWED_* variant
-    (ALLOWED_SEPARATION_MODELS, ALLOWED_WHISPER_MODEL_SIZES) too, since block_network=True means a
-    request for any NOT-pre-warmed variant will hard-fail at runtime with no fallback -- there's
-    no "slow path", just a network error. Tracked as follow-up, not done here to keep this
-    validation pass's build time/cost proportionate.
+    (ALLOWED_SEPARATION_MODELS, ALLOWED_WHISPER_MODEL_SIZES) too -- but the consequence of not
+    pre-warming a variant differs by stage, and both halves are worth stating precisely rather
+    than as one blanket claim:
+    - run_transcribe keeps block_network=True (see below), so a client requesting a
+      non-pre-warmed ALLOWED_WHISPER_MODEL_SIZES value hard-fails at runtime with no fallback --
+      there's no "slow path", just a network error.
+    - run_separate does NOT have block_network=True (see its own comment) -- a client requesting
+      "htdemucs_ft" (the one non-pre-warmed ALLOWED_SEPARATION_MODELS value) will currently
+      SUCCEED, just slowly, by downloading those weights live on every cold container. This is a
+      real, client-influenced network fetch (the destination is fixed and the value is one of two
+      allowlisted strings, so it's not attacker-directed egress, but "nothing the client can
+      influence" would be an overstatement -- see run_separate's own comment).
+    Tracked as follow-up, not done here to keep this validation pass's build time/cost
+    proportionate.
     """
     from demucs.api import Separator
     from faster_whisper import WhisperModel
@@ -102,6 +117,15 @@ _SEPARATION_TIMEOUT_SECONDS = 1800
 _TRANSCRIPTION_TIMEOUT_SECONDS = 1800
 _PACKAGE_TIMEOUT_SECONDS = 3600
 
+# The `local` backend's process-wide lock (app/gpu_backend.py's _inference_lock) structurally
+# capped this project at one inference job at a time -- Modal has no equivalent unless told to.
+# Per-IP rate limits (app/rate_limit.py, 20/hour on each of these routes) bound one caller, not
+# total concurrency/spend across every caller. This is a real cost-safety backstop
+# (CLAUDE.md: "runs ML inference that costs real money per second"), not a performance tuning
+# knob -- picked to match the concurrency this milestone's own light load test actually validated
+# (M7c Task 4: 4 concurrent /separate calls, all real, all succeeded), not a guess.
+_MAX_CONTAINERS = 5
+
 
 # NOT block_network=True here, unlike the other three pipeline functions -- a real, measured
 # Modal platform constraint, not a retreat from Decision 2's zero-egress goal.
@@ -124,11 +148,19 @@ _PACKAGE_TIMEOUT_SECONDS = 3600
 #
 # separate_audio() itself never makes a network call of its own (confirmed: this is the same
 # function the `local` backend already calls, with no code path that reaches out) -- the egress
-# here is entirely Modal's platform transport for a large return value, not anything an attacker
-# supplying a malicious audio file could reach or influence. run_transcribe/run_realign/run_package
+# from Modal's own platform transport for a large return value is not anything the AUDIO FILE's
+# content could reach or influence (a malicious byte sequence can't redirect it). Precisely:
+# `model_name` IS a client-supplied value, and today (without full networking here, "htdemucs_ft"
+# -- the one of the two ALLOWED_SEPARATION_MODELS values this image doesn't pre-warm) would
+# download its weights live on first use, an outbound fetch a client request genuinely triggers --
+# see _prewarm_model_weights' docstring for the precise statement. The destination is fixed and
+# the value is one of exactly two allowlisted strings, so this isn't attacker-directed egress, but
+# "nothing a client can influence" would overstate it. run_transcribe/run_realign/run_package
 # return small structured data (word timings, pitch/beat/section numbers) that stays well under
 # 2 MiB, so they keep block_network=True -- this is a real, per-function, measured distinction.
-@app.function(gpu="A10", timeout=_SEPARATION_TIMEOUT_SECONDS)
+@app.function(
+    gpu="A10", timeout=_SEPARATION_TIMEOUT_SECONDS, max_containers=_MAX_CONTAINERS
+)
 def run_separate(audio_bytes: bytes, model_name: str) -> dict[str, bytes]:
     import shutil
     from pathlib import Path
@@ -151,7 +183,12 @@ def run_separate(audio_bytes: bytes, model_name: str) -> dict[str, bytes]:
         Path(tmp.name).unlink(missing_ok=True)
 
 
-@app.function(gpu="A10", block_network=True, timeout=_TRANSCRIPTION_TIMEOUT_SECONDS)
+@app.function(
+    gpu="A10",
+    block_network=True,
+    timeout=_TRANSCRIPTION_TIMEOUT_SECONDS,
+    max_containers=_MAX_CONTAINERS,
+)
 def run_transcribe(audio_bytes: bytes, model_size: str) -> TranscriptionResult:
     from pathlib import Path
     from tempfile import NamedTemporaryFile
@@ -168,7 +205,12 @@ def run_transcribe(audio_bytes: bytes, model_size: str) -> TranscriptionResult:
         Path(tmp.name).unlink(missing_ok=True)
 
 
-@app.function(gpu="A10", block_network=True, timeout=_TRANSCRIPTION_TIMEOUT_SECONDS)
+@app.function(
+    gpu="A10",
+    block_network=True,
+    timeout=_TRANSCRIPTION_TIMEOUT_SECONDS,
+    max_containers=_MAX_CONTAINERS,
+)
 def run_realign(audio_bytes: bytes, text: str) -> list[Word]:
     from pathlib import Path
     from tempfile import NamedTemporaryFile
@@ -185,10 +227,28 @@ def run_realign(audio_bytes: bytes, text: str) -> list[Word]:
         Path(tmp.name).unlink(missing_ok=True)
 
 
-@app.function(gpu="A10", block_network=True, timeout=_PACKAGE_TIMEOUT_SECONDS)
+@app.function(
+    gpu="A10",
+    block_network=True,
+    timeout=_PACKAGE_TIMEOUT_SECONDS,
+    max_containers=_MAX_CONTAINERS,
+)
 def run_package(
     vocals_bytes: bytes, drums_bytes: bytes, bass_bytes: bytes, other_bytes: bytes, pitch_model: str
-) -> PackageResult:
+) -> dict[str, object]:
+    """Returns a compact dict, NOT a PackageResult, unlike what a first reading of this file might
+    expect -- final whole-branch review measured PackageResult's real pickled size at this
+    project's own MAX_DURATION_SECONDS cap (12 minutes, fingerprint.py) and found it hits 2.67 MiB
+    at CREPE_HOP_MS=10's frame rate (packaging.py) -- over Modal's real 2 MiB inline-payload
+    threshold, THE SAME failure mode run_separate was fixed for, just never triggered by this
+    milestone's 3-second synthetic test track. A list[PitchFrame] of dataclass instances carries a
+    lot of per-object pickle overhead; struct-packing the three parallel arrays (time_ms as
+    uint32, hz and confidence as float32, NaN standing in for hz=None) measured at 0.83 MiB for a
+    12-minute track -- comfortable margin under the threshold, verified before this was written.
+    gpu_backend.py's _run_package_modal unpacks this back into a real PackageResult; no caller
+    outside these two functions ever sees the compact wire format.
+    """
+    import struct
     from pathlib import Path
     from tempfile import NamedTemporaryFile
 
@@ -209,7 +269,7 @@ def run_package(
             tmp.close()
             tmp_paths[stem_name] = Path(tmp.name)
 
-        return build_package(
+        result = build_package(
             vocals_path=tmp_paths["vocals"],
             drums_path=tmp_paths["drums"],
             bass_path=tmp_paths["bass"],
@@ -219,6 +279,23 @@ def run_package(
     finally:
         for path in tmp_paths.values():
             path.unlink(missing_ok=True)
+
+    n = len(result.pitch)
+    nan = float("nan")
+    pitch_bytes = struct.pack(
+        f"<{n}I{n}f{n}f",
+        *(frame.time_ms for frame in result.pitch),
+        *(nan if frame.hz is None else frame.hz for frame in result.pitch),
+        *(frame.confidence for frame in result.pitch),
+    )
+    return {
+        "pitch_model": result.pitch_model,
+        "pitch_bytes": pitch_bytes,
+        "pitch_frame_count": n,
+        "tempo_bpm": result.tempo_bpm,
+        "beats_ms": result.beats_ms,
+        "sections_ms": result.sections_ms,
+    }
 
 
 @app.function(block_network=False, timeout=30)

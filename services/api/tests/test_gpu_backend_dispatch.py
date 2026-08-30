@@ -25,6 +25,7 @@ def test_run_separate_dispatches_to_modal_backend_when_configured(
     """Verify that when GPU_BACKEND=modal, the function dispatches to Modal instead of local.
     This test doesn't exercise real inference (no synthetic_wav_bytes needed) -- it just verifies
     dispatch routing with a mocked Modal Function."""
+    pytest.importorskip("modal")  # optional dependency -- see pyproject.toml's `modal` extra
     monkeypatch.setenv("GPU_BACKEND", "modal")
     fake_result = {"vocals": b"v", "drums": b"d", "bass": b"b", "other": b"o"}
     fake_fn = MagicMock()

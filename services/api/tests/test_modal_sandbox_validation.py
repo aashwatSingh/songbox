@@ -4,11 +4,17 @@ import os
 
 import pytest
 
-_has_modal_credentials = os.environ.get("MODAL_TOKEN_ID") or os.path.exists(
-    os.path.expanduser("~/.modal.toml")
-)
+# Deliberately NOT gated on credential presence alone (e.g. `~/.modal.toml` existing) -- on the
+# project owner's own machine that file exists once `modal setup` has ever been run, which would
+# make a plain `pytest` invocation silently make real, billable calls to a live Modal deployment
+# by default. Final whole-branch review flagged this as a real risk (accidental repeated billing),
+# not a hypothetical -- these two tests require an explicit, deliberate opt-in instead.
 pytestmark = pytest.mark.skipif(
-    not _has_modal_credentials, reason="requires real Modal credentials -- see M7c Task 4"
+    not os.environ.get("SONGBOX_MODAL_LIVE_TESTS"),
+    reason=(
+        "requires real Modal credentials AND explicit opt-in -- see M7c Task 4. "
+        "Run as: SONGBOX_MODAL_LIVE_TESTS=1 pytest tests/test_modal_sandbox_validation.py"
+    ),
 )
 
 
@@ -18,9 +24,11 @@ def test_block_network_true_actually_blocks_a_real_outbound_call() -> None:
     (which would look identical from the outside if egress happened to succeed by accident).
 
     This calls `blocked_egress_probe`, not one of the four real pipeline functions
-    (run_separate/etc.) -- those never attempt a network call at all, even on bad input (that's
-    the whole point of Decision 2's zero-egress design), so feeding them garbage bytes would prove
-    nothing about network blocking; the failure would just be a WAV-parsing error either way.
+    (run_separate/etc.) -- feeding one of them garbage bytes would prove nothing about network
+    blocking, since a WAV-parsing failure happens the same way regardless of block_network's
+    value (see app/modal_app.py's module docstring for exactly which of the four keep
+    block_network=True today -- it's three of four, not all four, a real finding from this same
+    validation pass, not the original design).
     `blocked_egress_probe` runs the EXACT SAME urllib call as the sibling `egress_probe` function
     below, differing only in `block_network`, so its failure (or success) is real, direct evidence.
     """

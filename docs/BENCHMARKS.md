@@ -213,15 +213,22 @@ the `local` CPU backend and explicitly marked not representative of Modal/RunPod
 | `/transcribe` | 8.9s | `language=en` (real faster-whisper + wav2vec2 output) |
 | `/package` | 21.1s | `tempo_bpm=139.67` (real torchcrepe + librosa output) |
 
-**Cost for that one full-pipeline run:** (13.8 + 8.9 + 21.1) × $0.000306/s ≈ **$0.0134**.
+**Cost for that one full-pipeline run:** (13.8 + 8.9 + 21.1) × $0.000306/s ≈ **$0.0134**. This is
+derived from real per-request wall-clock duration × Modal's real published price-per-second, not
+read off Modal's own billing dashboard — a floor, not the exact bill, since it excludes container
+startup/idle-shutdown time Modal actually charges for. The durations themselves are real request
+wall-clock (`time.monotonic()` around each HTTP call), not isolated GPU-compute time — network/API
+overhead is included, not subtracted out.
 
-**Light load test** (per the approved scope — 3-5 real concurrent jobs, not a production-scale
-test): 4 concurrent `/separate` calls against 4 distinct synthetic tracks, all succeeded (200).
-Individual durations: 9.5s, 4.3s, 5.8s, 2.5s (sum: 22.1s of real GPU-compute-seconds, cost ≈
-$0.0068 for this batch) — but the whole batch's **wall-clock** was only 9.5s, matching the single
-slowest job rather than the sum of all four. This is real, direct evidence of genuine concurrency:
-Modal's containers run independently in parallel, unlike the `local` backend's single
-process-wide lock, which serializes every job onto one machine.
+**Light load test** (narrower than the approved scope's "3-5 real concurrent jobs through the full
+pipeline" — what actually ran was 4 concurrent `/separate` calls only, not the full pipeline per
+job; `/package`'s payload-size fix, below, means the full pipeline is worth re-running under real
+concurrency too, not just `/separate` alone): 4 concurrent `/separate` calls against 4 distinct
+synthetic tracks, all succeeded (200). Individual durations: 9.5s, 4.3s, 5.8s, 2.5s (sum: 22.1s of
+summed request duration, cost ≈ $0.0068 for this batch) — but the whole batch's **wall-clock** was
+only 9.5s, matching the single slowest job rather than the sum of all four. This is real, direct
+evidence of genuine concurrency: Modal's containers run independently in parallel, unlike the
+`local` backend's single process-wide lock, which serializes every job onto one machine.
 
 **What this measures, and what it does not:** these numbers are for a 3-second synthetic test
 tone, not a real multi-minute song — Demucs/Whisper/CREPE processing time scales with track
@@ -240,6 +247,19 @@ threshold, and payloads above that threshold are transported through Modal's own
 backend — from inside the function's container, which `block_network=True` blocks (confirmed by a
 real failed deploy: a genuine `ClientConnectorDNSError` reaching
 `modal-blobs.s3-accelerate.amazonaws.com` from inside the container, not from `separate_audio()`'s
-own code, which never makes a network call of its own). `run_transcribe`/`run_realign`/
-`run_package` return small structured data well under 2 MiB and keep `block_network=True`. See
-`app/modal_app.py`'s comment on `run_separate` for the full account.
+own code, which never makes a network call of its own). `run_transcribe`/`run_realign` return
+small structured data well under 2 MiB and keep `block_network=True`. See `app/modal_app.py`'s
+comment on `run_separate` for the full account.
+
+**A second, near-identical finding caught by final review, not by the original validation run:**
+`run_package`'s own return value (a full pitch contour, one frame per 10ms of track) crosses the
+same 2 MiB threshold at this project's own 12-minute `MAX_DURATION_SECONDS` cap — real, measured
+size: **2.67 MiB** at 72,000 frames, using the exact `PackageResult` dataclass `build_package()`
+already returns. The 3-second synthetic test track (300 frames) could never surface this. Unlike
+`run_separate`, this one was fixed rather than conceded: struct-packing the same pitch data as
+three parallel byte arrays (`time_ms` as `uint32`, `hz`/`confidence` as `float32`, `NaN` standing
+in for `hz=None`) instead of a `list[PitchFrame]` of dataclass instances measured at **0.83 MiB**
+for the same 12-minute track — comfortable margin under the threshold. `run_package` keeps
+`block_network=True`; `gpu_backend.py`'s `_run_package_modal` unpacks the compact format back into
+a real `PackageResult` before returning it to the route handler, so no other caller in the
+codebase is aware the wire format ever changed.

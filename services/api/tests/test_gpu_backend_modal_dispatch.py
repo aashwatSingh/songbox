@@ -5,7 +5,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from app.gpu_backend import run_package, run_realign, run_separate, run_transcribe
+pytest.importorskip("modal")  # optional dependency -- every test in this file mocks it
+
+from app.gpu_backend import run_package, run_realign, run_separate, run_transcribe  # noqa: E402
 
 
 class _FakeModalFunction:
@@ -90,9 +92,29 @@ def test_run_realign_dispatches_to_the_named_modal_function(
 def test_run_package_dispatches_to_the_named_modal_function_with_four_byte_args(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """run_package's Modal Function does NOT return a PackageResult directly -- final whole-branch
+    review found its pitch contour crosses Modal's real 2 MiB inline-payload threshold at this
+    project's own 12-minute track cap, so app/modal_app.py's run_package struct-packs the pitch
+    data into a compact dict instead (see its docstring), and gpu_backend.py's _run_package_modal
+    unpacks it back into a real PackageResult. This test mocks the REAL wire shape -- a dict with
+    struct-packed pitch_bytes -- not a bare object(), so it actually exercises the unpacking code,
+    not just the dispatch call.
+    """
+    import struct
+
+    from app.packaging import PackageResult
+
     monkeypatch.setenv("GPU_BACKEND", "modal")
-    fake_result = object()
-    fake_fn = _FakeModalFunction(return_value=fake_result)
+    pitch_bytes = struct.pack("<2I2f2f", 0, 10, 220.5, float("nan"), 0.9, 0.0)
+    fake_raw_result = {
+        "pitch_model": "tiny",
+        "pitch_bytes": pitch_bytes,
+        "pitch_frame_count": 2,
+        "tempo_bpm": 120.0,
+        "beats_ms": [0, 500],
+        "sections_ms": [0],
+    }
+    fake_fn = _FakeModalFunction(return_value=fake_raw_result)
     from_name = MagicMock(return_value=fake_fn)
     monkeypatch.setattr("modal.Function.from_name", from_name)
 
@@ -105,6 +127,17 @@ def test_run_package_dispatches_to_the_named_modal_function_with_four_byte_args(
         timeout_seconds=3600,
     )
 
-    assert result is fake_result
+    assert isinstance(result, PackageResult)
+    assert result.pitch_model == "tiny"
+    assert result.tempo_bpm == 120.0
+    assert result.beats_ms == [0, 500]
+    assert result.sections_ms == [0]
+    assert len(result.pitch) == 2
+    assert result.pitch[0].time_ms == 0
+    assert result.pitch[0].hz == pytest.approx(220.5)
+    assert result.pitch[0].confidence == pytest.approx(0.9)
+    assert result.pitch[1].time_ms == 10
+    assert result.pitch[1].hz is None  # NaN sentinel correctly converted back to None
+    assert result.pitch[1].confidence == pytest.approx(0.0)
     from_name.assert_called_once_with("songbox-gpu", "run_package")
     assert fake_fn.calls == [(b"v", b"d", b"b", b"o", "tiny")]
