@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import shutil
 import tempfile
 import uuid
 from datetime import UTC, datetime
@@ -19,7 +18,14 @@ from app.auth import Identity, get_identity
 from app.db import get_db
 from app.fingerprint import FingerprintError, fingerprint_audio
 from app.gate import resolve_lane_outcome, resolve_lyrics_display_allowed
-from app.gpu_backend import BackendBusyError, BackendTimeoutError, run_inference
+from app.gpu_backend import (
+    BackendBusyError,
+    BackendTimeoutError,
+    run_package,
+    run_realign,
+    run_separate,
+    run_transcribe,
+)
 from app.job_cost import track_job_cost
 from app.karaoke_schema import KARAOKE_SCHEMA_V1
 from app.models import (
@@ -398,50 +404,37 @@ def separate_track(
             status_code=422, detail="stored file no longer matches any accepted audio format"
         )
 
-    tmp = tempfile.NamedTemporaryFile(suffix=f".{audio_format}", delete=False)
-    try:
-        tmp.write(original_bytes)
-        tmp.flush()
-        tmp.close()
-
-        with track_job_cost(track.id, "separate"):
-            try:
-                stem_paths = run_inference(
-                    lambda: separate_audio(Path(tmp.name), model_name=model_name),
-                    timeout_seconds=SEPARATION_TIMEOUT_SECONDS,
-                )
-            except BackendBusyError as exc:
-                raise HTTPException(status_code=503, detail=str(exc)) from exc
-            except BackendTimeoutError as exc:
-                raise HTTPException(status_code=504, detail=str(exc)) from exc
-            except SeparationError as exc:
-                raise HTTPException(
-                    status_code=422, detail=f"could not separate audio: {exc}"
-                ) from exc
-    finally:
-        Path(tmp.name).unlink(missing_ok=True)
+    with track_job_cost(track.id, "separate"):
+        try:
+            stems_bytes = run_separate(
+                original_bytes,
+                model_name=model_name,
+                timeout_seconds=SEPARATION_TIMEOUT_SECONDS,
+                separate_audio_fn=separate_audio,
+            )
+        except BackendBusyError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except BackendTimeoutError as exc:
+            raise HTTPException(status_code=504, detail=str(exc)) from exc
+        except SeparationError as exc:
+            raise HTTPException(
+                status_code=422, detail=f"could not separate audio: {exc}"
+            ) from exc
 
     stems: list[StemInfo] = []
-    try:
-        for stem_type, stem_path in stem_paths.items():
-            stem_bytes = stem_path.read_bytes()
-            storage_key = save_track_file(minio_client, identity.tenant_id, stem_bytes)
-            db.add(
-                Stem(
-                    id=uuid.uuid4(),
-                    tenant_id=identity.tenant_id,
-                    track_id=track.id,
-                    stem_type=stem_type,
-                    storage_key=storage_key,
-                    model_name=model_name,
-                )
+    for stem_type, stem_bytes in stems_bytes.items():
+        storage_key = save_track_file(minio_client, identity.tenant_id, stem_bytes)
+        db.add(
+            Stem(
+                id=uuid.uuid4(),
+                tenant_id=identity.tenant_id,
+                track_id=track.id,
+                stem_type=stem_type,
+                storage_key=storage_key,
+                model_name=model_name,
             )
-            stems.append(StemInfo(stem_type=stem_type, storage_key=storage_key))
-    finally:
-        # Clean up the temp directory created by separate_audio() -- all stem files share
-        # the same parent directory from tempfile.mkdtemp(). Get the parent of any stem path.
-        stem_dir = next(iter(stem_paths.values())).parent
-        shutil.rmtree(stem_dir, ignore_errors=True)
+        )
+        stems.append(StemInfo(stem_type=stem_type, storage_key=storage_key))
 
     return SeparateResponse(track_id=track.id, stems=stems)
 
@@ -535,35 +528,30 @@ def transcribe_track(
     minio_client = get_minio_client()
     vocal_bytes = fetch_track_file(minio_client, vocals_stem.storage_key)
 
-    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-    try:
-        tmp.write(vocal_bytes)
-        tmp.flush()
-        tmp.close()
-        with track_job_cost(track.id, "transcribe"):
-            try:
-                result = run_inference(
-                    lambda: run_transcription_and_alignment(Path(tmp.name), model_size=model_size),
-                    timeout_seconds=TRANSCRIPTION_TIMEOUT_SECONDS,
-                )
-            except BackendBusyError as exc:
-                raise HTTPException(status_code=503, detail=str(exc)) from exc
-            except BackendTimeoutError as exc:
-                raise HTTPException(status_code=504, detail=str(exc)) from exc
-            except TranscriptionError as exc:
-                raise HTTPException(
-                    status_code=422, detail=f"could not transcribe audio: {exc}"
-                ) from exc
-            except AlignmentError as exc:
-                # Deliberately NOT interpolating `exc` into the response -- CLAUDE.md forbids
-                # logging raw lyrics. An alignment failure can occur mid-transcript, so its
-                # message must never be trusted to be content-free by construction the way
-                # TranscriptionError's failures (which occur before any text exists) are.
-                raise HTTPException(
-                    status_code=422, detail="could not align transcript to audio"
-                ) from exc
-    finally:
-        Path(tmp.name).unlink(missing_ok=True)
+    with track_job_cost(track.id, "transcribe"):
+        try:
+            result = run_transcribe(
+                vocal_bytes,
+                model_size=model_size,
+                timeout_seconds=TRANSCRIPTION_TIMEOUT_SECONDS,
+                run_transcription_and_alignment_fn=run_transcription_and_alignment,
+            )
+        except BackendBusyError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except BackendTimeoutError as exc:
+            raise HTTPException(status_code=504, detail=str(exc)) from exc
+        except TranscriptionError as exc:
+            raise HTTPException(
+                status_code=422, detail=f"could not transcribe audio: {exc}"
+            ) from exc
+        except AlignmentError as exc:
+            # Deliberately NOT interpolating `exc` into the response -- CLAUDE.md forbids
+            # logging raw lyrics. An alignment failure can occur mid-transcript, so its
+            # message must never be trusted to be content-free by construction the way
+            # TranscriptionError's failures (which occur before any text exists) are.
+            raise HTTPException(
+                status_code=422, detail="could not align transcript to audio"
+            ) from exc
 
     declaration = db.get(RightsDeclaration, track.rights_declaration_id)
     if declaration is None:
@@ -699,28 +687,23 @@ def realign_track(
     minio_client = get_minio_client()
     vocal_bytes = fetch_track_file(minio_client, vocals_stem.storage_key)
 
-    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-    try:
-        tmp.write(vocal_bytes)
-        tmp.flush()
-        tmp.close()
-        with track_job_cost(track.id, "realign"):
-            try:
-                words = run_inference(
-                    lambda: align_words(Path(tmp.name), body.text),
-                    timeout_seconds=TRANSCRIPTION_TIMEOUT_SECONDS,
-                )
-            except BackendBusyError as exc:
-                raise HTTPException(status_code=503, detail=str(exc)) from exc
-            except BackendTimeoutError as exc:
-                raise HTTPException(status_code=504, detail=str(exc)) from exc
-            except AlignmentError as exc:
-                # Deliberately NOT interpolating `exc` -- same reasoning as /transcribe's mapping.
-                raise HTTPException(
-                    status_code=422, detail="could not align transcript to audio"
-                ) from exc
-    finally:
-        Path(tmp.name).unlink(missing_ok=True)
+    with track_job_cost(track.id, "realign"):
+        try:
+            words = run_realign(
+                vocal_bytes,
+                text=body.text,
+                timeout_seconds=TRANSCRIPTION_TIMEOUT_SECONDS,
+                align_words_fn=align_words,
+            )
+        except BackendBusyError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except BackendTimeoutError as exc:
+            raise HTTPException(status_code=504, detail=str(exc)) from exc
+        except AlignmentError as exc:
+            # Deliberately NOT interpolating `exc` -- same reasoning as /transcribe's mapping.
+            raise HTTPException(
+                status_code=422, detail="could not align transcript to audio"
+            ) from exc
 
     declaration = db.get(RightsDeclaration, track.rights_declaration_id)
     if declaration is None:
@@ -824,39 +807,28 @@ def package_track(
         )
 
     minio_client = get_minio_client()
-    tmp_paths: dict[str, Path] = {}
-    try:
-        for stem_type, stem in stems_by_type.items():
-            data = fetch_track_file(minio_client, stem.storage_key)
-            tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-            tmp.write(data)
-            tmp.flush()
-            tmp.close()
-            tmp_paths[stem_type] = Path(tmp.name)
+    stem_bytes_by_type = {
+        stem_type: fetch_track_file(minio_client, stem.storage_key)
+        for stem_type, stem in stems_by_type.items()
+    }
 
-        with track_job_cost(track.id, "package"):
-            try:
-                result = run_inference(
-                    lambda: build_package(
-                        vocals_path=tmp_paths["vocals"],
-                        drums_path=tmp_paths["drums"],
-                        bass_path=tmp_paths["bass"],
-                        other_path=tmp_paths["other"],
-                        pitch_model=pitch_model,
-                    ),
-                    timeout_seconds=PACKAGE_TIMEOUT_SECONDS,
-                )
-            except BackendBusyError as exc:
-                raise HTTPException(status_code=503, detail=str(exc)) from exc
-            except BackendTimeoutError as exc:
-                raise HTTPException(status_code=504, detail=str(exc)) from exc
-            except (AccompanimentError, PitchExtractionError, StructureExtractionError) as exc:
-                raise HTTPException(
-                    status_code=422, detail="could not package track"
-                ) from exc
-    finally:
-        for path in tmp_paths.values():
-            path.unlink(missing_ok=True)
+    with track_job_cost(track.id, "package"):
+        try:
+            result = run_package(
+                vocals_bytes=stem_bytes_by_type["vocals"],
+                drums_bytes=stem_bytes_by_type["drums"],
+                bass_bytes=stem_bytes_by_type["bass"],
+                other_bytes=stem_bytes_by_type["other"],
+                pitch_model=pitch_model,
+                timeout_seconds=PACKAGE_TIMEOUT_SECONDS,
+                build_package_fn=build_package,
+            )
+        except BackendBusyError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except BackendTimeoutError as exc:
+            raise HTTPException(status_code=504, detail=str(exc)) from exc
+        except (AccompanimentError, PitchExtractionError, StructureExtractionError) as exc:
+            raise HTTPException(status_code=422, detail="could not package track") from exc
 
     words_json = [
         dict(w, text=(w["text"] if latest_transcription.lyrics_display_allowed else None))

@@ -52,3 +52,8 @@ def synthetic_wav(tmp_path: Path) -> Path:
     )
     assert result.returncode == 0, result.stderr.decode(errors="replace")
     return out_path
+
+
+@pytest.fixture
+def synthetic_wav_bytes(synthetic_wav: Path) -> bytes:
+    return synthetic_wav.read_bytes()
