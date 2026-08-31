@@ -25,6 +25,7 @@ dependencies = [
     "redis>=5.0",
     "pyyaml>=6.0",
     "argon2-cffi>=23.1",
+    "email-validator>=2.2",
 ]
 
 [project.optional-dependencies]

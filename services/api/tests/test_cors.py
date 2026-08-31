@@ -22,3 +22,4 @@ def test_configured_localhost_origin_gets_cors_headers_on_preflight() -> None:
 
     assert response.status_code == 200
     assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
+    assert response.headers["access-control-allow-credentials"] == "true"

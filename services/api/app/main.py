@@ -12,6 +12,7 @@ from slowapi.errors import RateLimitExceeded
 from app.logging_config import configure_logging
 from app.rate_limit import limiter
 from app.routes.admin import router as admin_router
+from app.routes.auth import router as auth_router
 from app.routes.review_queue import router as review_queue_router
 from app.routes.tracks import router as tracks_router
 
@@ -28,11 +29,16 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # ty
 
 # Dev-only permissive CORS so the Next.js dev server (localhost:3000) can call this API
 # (localhost:8000) cross-origin. Not a production CORS policy -- tighten before any real deploy.
+# allow_credentials=True is required for the browser to send/receive the httpOnly session cookie
+# cross-origin (localhost:3000 -> localhost:8000) -- safe here specifically because allow_origins
+# is a concrete origin, not "*" (the CORS spec forbids combining allow_credentials with a wildcard
+# origin, and browsers enforce this).
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"],
     allow_methods=["GET", "POST"],
-    allow_headers=["X-Dev-Tenant-Id", "X-Dev-User-Id", "Content-Type"],
+    allow_headers=["Content-Type"],
+    allow_credentials=True,
 )
 
 
@@ -55,12 +61,18 @@ async def log_requests(
                 "path": request.url.path,
                 "status_code": status_code,
                 "duration_ms": round(duration_ms, 2),
-                "tenant_id": request.headers.get("X-Dev-Tenant-Id"),
+                # Set by app/auth.py's get_identity() on request.state after a real session
+                # lookup succeeds -- None for unauthenticated requests (e.g. /health, or a 401
+                # before identity ever resolves), same as before. Unlike the old
+                # X-Dev-Tenant-Id header this replaces, this value is now verified, not merely
+                # whatever the caller claimed.
+                "tenant_id": getattr(request.state, "tenant_id", None),
                 "client_ip": request.client.host if request.client else None,
             },
         )
 
 
+app.include_router(auth_router)
 app.include_router(tracks_router)
 app.include_router(review_queue_router)
 app.include_router(admin_router)
