@@ -70,9 +70,15 @@ def test_estimate_cost_usd_ignores_future_dated_entries(tmp_path: Path) -> None:
     assert result == pytest.approx(0.01)
 
 
-def test_track_job_cost_logs_real_duration_and_null_cost_against_real_empty_yaml(
-    caplog: pytest.LogCaptureFixture,
+def test_track_job_cost_logs_real_duration_and_null_cost_on_the_default_local_backend(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # GPU_BACKEND defaults to "local" -- track_job_cost must never price a local job using
+    # config/gpu_costs.yaml's real Modal rate, regardless of whether that file is populated.
+    # Explicitly unset here (rather than relying on ambient environment) so this test's intent --
+    # "the default backend never gets priced" -- doesn't depend on what the calling shell happens
+    # to have set.
+    monkeypatch.delenv("GPU_BACKEND", raising=False)
     track_id = uuid.uuid4()
     with caplog.at_level(logging.INFO, logger="songbox.job_cost"):
         with track_job_cost(track_id, "separate"):
@@ -85,8 +91,32 @@ def test_track_job_cost_logs_real_duration_and_null_cost_against_real_empty_yaml
     assert record.job_type == "separate"  # type: ignore[attr-defined]
     assert isinstance(record.duration_seconds, float)  # type: ignore[attr-defined]
     assert record.duration_seconds >= 0  # type: ignore[attr-defined]
-    # config/gpu_costs.yaml is still an empty TODO: unmeasured stub at this point in the project.
+    # Real cost, regardless of what config/gpu_costs.yaml contains -- GPU_BACKEND=local never
+    # incurs real per-second billing, so track_job_cost must not even consult the pricing table.
     assert record.estimated_cost_usd is None  # type: ignore[attr-defined]
+
+
+def test_track_job_cost_computes_a_real_cost_when_backend_is_modal(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The other half of the gating logic: GPU_BACKEND=modal DOES consult the pricing table.
+    # Uses the real config/gpu_costs.yaml (populated with Modal's real A10 price since M7c) rather
+    # than a temp file -- estimate_cost_usd()'s gpu_costs_path parameter defaults to the real path
+    # bound once at function-definition time (Python default-argument semantics), so monkeypatching
+    # the module-level _GPU_COSTS_PATH name after import would NOT actually change what a call
+    # with no explicit override reads. Asserting only `> 0`, not an exact figure, since this test
+    # shouldn't need to know or hardcode the real recorded price.
+    monkeypatch.setenv("GPU_BACKEND", "modal")
+
+    track_id = uuid.uuid4()
+    with caplog.at_level(logging.INFO, logger="songbox.job_cost"):
+        with track_job_cost(track_id, "separate"):
+            pass
+
+    job_records = [r for r in caplog.records if r.name == "songbox.job_cost"]
+    assert len(job_records) == 1
+    assert job_records[0].estimated_cost_usd is not None  # type: ignore[attr-defined]
+    assert job_records[0].estimated_cost_usd > 0  # type: ignore[attr-defined]
 
 
 def test_track_job_cost_still_logs_when_the_wrapped_block_raises(
@@ -136,6 +166,10 @@ def test_separate_endpoint_logs_a_real_gpu_job_cost_line(
 def test_track_job_cost_degrades_to_null_cost_if_pricing_lookup_fails(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
+    # GPU_BACKEND=modal is required here -- track_job_cost only calls estimate_cost_usd() at all
+    # when the backend is modal, so without this the mocked failure below would never be reached.
+    monkeypatch.setenv("GPU_BACKEND", "modal")
+
     def _broken_estimate(duration_seconds: float) -> float | None:
         raise KeyError("price_per_second_usd")
 
@@ -163,6 +197,10 @@ def test_track_job_cost_degrades_to_null_cost_if_pricing_lookup_fails(
 def test_track_job_cost_pricing_failure_does_not_mask_the_original_exception(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # See the comment on test_track_job_cost_degrades_to_null_cost_if_pricing_lookup_fails above --
+    # same reason GPU_BACKEND=modal is required for this mocked failure to ever be reached.
+    monkeypatch.setenv("GPU_BACKEND", "modal")
+
     def _broken_estimate(duration_seconds: float) -> float | None:
         raise KeyError("price_per_second_usd")
 

@@ -246,7 +246,14 @@ def run_package(
     uint32, hz and confidence as float32, NaN standing in for hz=None) measured at 0.83 MiB for a
     12-minute track -- comfortable margin under the threshold, verified before this was written.
     gpu_backend.py's _run_package_modal unpacks this back into a real PackageResult; no caller
-    outside these two functions ever sees the compact wire format.
+    outside these two functions ever sees the compact wire format -- true of the SHAPE (still a
+    list[PitchFrame] on the far side), but not exactly true of the VALUES: float32 is lossy versus
+    the float64 build_package() itself produces. A confidence of 0.9 round-trips as
+    0.8999999761581421, not 0.9. This is musically irrelevant (nowhere near audible or visible
+    pitch-guide precision) and was confirmed identical to 6 decimal places across BENCHMARKS.md's
+    real pre/post-fix runs, but it is a real, measurable precision loss a caller doing exact
+    equality on pitch/confidence values would observe -- worth knowing before this format is reused
+    for something exactness-sensitive.
     """
     import struct
     from pathlib import Path

@@ -262,4 +262,8 @@ in for `hz=None`) instead of a `list[PitchFrame]` of dataclass instances measure
 for the same 12-minute track — comfortable margin under the threshold. `run_package` keeps
 `block_network=True`; `gpu_backend.py`'s `_run_package_modal` unpacks the compact format back into
 a real `PackageResult` before returning it to the route handler, so no other caller in the
-codebase is aware the wire format ever changed.
+codebase is aware the wire format ever changed — true of the *shape* (every other caller still
+sees a `list[PitchFrame]`), but not exactly true of the *values*: `float32` is lossy versus
+`build_package()`'s native `float64`, so e.g. a confidence of `0.9` round-trips as
+`0.8999999761581421`. Musically irrelevant (confirmed identical to 6 decimal places across the
+real pre/post-fix runs above), but a real, measurable precision loss.

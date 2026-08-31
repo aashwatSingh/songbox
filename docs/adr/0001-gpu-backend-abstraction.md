@@ -80,15 +80,18 @@ limits") with what's actually true today, item by item:
   section for the measured numbers. This ADR's original wording assumed all four functions could
   get the same guarantee uniformly — real infrastructure proved that assumption wrong for one of
   them.
-- **Seccomp, dropped capabilities, non-root execution:** Modal's real, documented runtime is
-  gVisor-based (Google's application-kernel container isolation, also used by Cloud Run) — this
-  provides these properties platform-wide for every Modal Function, not as something this project
-  configures per-function. Not independently re-verified against this project's own deployment
-  (no per-function knob exists to check), but it's Modal's stated architecture, not an assumption
-  this project is making unchecked.
-- **Read-only root filesystem:** the same gVisor-based platform default applies; not something
-  this project has a way to configure or disable even if it wanted to, so there's no per-function
-  setting to audit here.
+- **Seccomp (corrected after confirmation review — the original wording overstated what gVisor
+  itself guarantees):** Modal's real, documented runtime is gVisor-based (Google's
+  application-kernel container isolation, also used by Cloud Run). gVisor's own mechanism *is*
+  syscall interception, so seccomp-style filtering is a direct property of running on it, given
+  platform-wide for every Modal Function without a per-function toggle.
+- **Dropped capabilities, non-root execution, read-only root filesystem:** these are ordinary
+  container-runtime configuration, a *different* axis from gVisor's syscall-interception guarantee
+  — gVisor being the sandbox doesn't by itself imply the container inside it drops capabilities or
+  mounts its root read-only. Modal may configure these platform-wide, but this project has not
+  verified that and there is no per-function knob to check it against. Correcting this ADR's
+  earlier text, which credited gVisor with all five properties as one bundle — that conflated two
+  independent claims and overstated the one that wasn't actually gVisor's to make.
 - **Hard job limits:** real, and cost-motivated, not just a security checkbox —
   `_MAX_CONTAINERS = 5` caps concurrent instances per pipeline function (`modal_app.py`), and
   `timeout=` mirrors the same wall-clock caps `app/routes/tracks.py` already enforced for the

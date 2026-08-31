@@ -81,13 +81,16 @@ What was built:
   with zero code changes needed there. What's still open: a real cost figure for an actual
   multi-minute song (this milestone only measured a 3-second synthetic test tone).
 - **The container-isolation properties this project doesn't configure itself, stated honestly
-  rather than left silent:** Modal's real, documented runtime is gVisor-based (Google's
-  application-kernel container isolation, also used by Cloud Run), which provides seccomp
-  filtering, dropped capabilities, and a read-only root filesystem platform-wide for every Modal
-  Function — not as something this project turns on per-function, and not independently
-  re-verified against this specific deployment (there's no per-function knob to check). This is
-  Modal's stated architecture, not an unchecked assumption, but it's worth naming as a distinct
-  claim from the network-egress properties this project *did* directly measure.
+  rather than left silent (corrected after confirmation review found the original claim
+  overstated):** Modal's real, documented runtime is gVisor-based (Google's application-kernel
+  container isolation, also used by Cloud Run). gVisor itself is a syscall-interception layer —
+  it gives every Modal Function seccomp-style syscall filtering by construction, not something
+  this project turns on per-function. Read-only root filesystem and dropped capabilities are a
+  *different* axis: ordinary container-runtime configuration, orthogonal to gVisor, that Modal may
+  or may not also apply platform-wide — this project has not verified whether it does, and there's
+  no per-function knob exposed to check. Network egress is the one axis this milestone *did*
+  directly measure against the real deployment (see the load test and `blocked_egress_probe`
+  results above) — don't read the other two as equally verified.
 
 **Test safety note:** `tests/test_modal_sandbox_validation.py` (the two tests that call the real
 deployed app) requires an explicit `SONGBOX_MODAL_LIVE_TESTS=1` opt-in, not just credential

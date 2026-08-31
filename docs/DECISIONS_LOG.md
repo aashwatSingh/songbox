@@ -48,6 +48,10 @@ same bug, just never triggered by the milestone's 3-second synthetic test track.
 struct-packs the pitch contour as three parallel byte arrays instead of a `list[PitchFrame]` of
 dataclass instances (measured: 0.83 MiB at 12 minutes), and `gpu_backend.py`'s
 `_run_package_modal` unpacks it back into a real `PackageResult` — no other caller in the codebase
-ever sees the compact wire format. Chosen over the alternative (drop `block_network=True` from
+ever sees the compact wire format's *shape*. Its *values* leak through, though: `hz`/`confidence`
+cross the wire as `float32`, lossy versus `build_package()`'s native `float64` (e.g. `0.9` round-trips
+as `0.8999999761581421`) — musically irrelevant, confirmed identical to 6 decimal places across real
+pre/post-fix benchmark runs, but a real precision change worth naming rather than glossing over.
+Chosen over the alternative (drop `block_network=True` from
 `run_package` too, matching `run_separate`) because the fix here is cheap and keeps the stronger
 guarantee, rather than conceding a second function to the same weaker posture as the first.

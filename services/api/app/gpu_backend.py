@@ -324,7 +324,9 @@ def _run_package_modal(
     mechanism). run_package's Modal Function instead struct-packs the pitch contour as three
     parallel arrays (measured: 0.83 MiB at 12 minutes), which this function reassembles into a
     real PackageResult so every OTHER caller in this codebase keeps working with the same type
-    build_package() has always returned.
+    build_package() has always returned. The reassembled TYPE is identical; the VALUES are not
+    bit-for-bit -- hz and confidence cross the wire as float32, not build_package()'s native
+    float64, so e.g. 0.9 comes back as 0.8999999761581421. Musically irrelevant, but real.
     """
     import math
     import struct
