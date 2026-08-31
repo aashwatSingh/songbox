@@ -10,8 +10,7 @@ from fastapi.testclient import TestClient
 
 from app.logging_config import JSONFormatter
 from app.main import app
-
-client = TestClient(app)
+from tests.conftest import AuthedClient
 
 
 def test_json_formatter_emits_one_parseable_line_with_extra_fields() -> None:
@@ -72,6 +71,7 @@ def test_json_formatter_includes_no_fields_beyond_what_was_explicitly_set() -> N
 def test_real_get_request_logs_method_path_status_and_duration(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    client = TestClient(app)
     with caplog.at_level(logging.INFO, logger="songbox.access"):
         response = client.get("/health")
 
@@ -87,24 +87,21 @@ def test_real_get_request_logs_method_path_status_and_duration(
     assert record.tenant_id is None  # type: ignore[attr-defined]  # no X-Dev-Tenant-Id was sent
 
 
-def test_request_with_tenant_header_logs_that_tenant_id(
-    caplog: pytest.LogCaptureFixture,
+def test_authenticated_request_logs_the_real_verified_tenant_id(
+    caplog: pytest.LogCaptureFixture, authed_client: AuthedClient
 ) -> None:
-    tenant_id = str(uuid.uuid4())
     with caplog.at_level(logging.INFO, logger="songbox.access"):
-        client.get(
-            "/tracks",
-            headers={"X-Dev-Tenant-Id": tenant_id, "X-Dev-User-Id": str(uuid.uuid4())},
-        )
+        authed_client.client.get("/tracks")
 
     access_records = [r for r in caplog.records if r.name == "songbox.access"]
     assert len(access_records) == 1
-    assert access_records[0].tenant_id == tenant_id  # type: ignore[attr-defined]
+    assert access_records[0].tenant_id == str(authed_client.tenant_id)  # type: ignore[attr-defined]
 
 
 def test_4xx_response_still_logs_the_real_status_code(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    client = TestClient(app)
     with caplog.at_level(logging.INFO, logger="songbox.access"):
         response = client.get(f"/tracks/{uuid.uuid4()}/transcription")
 
@@ -115,14 +112,13 @@ def test_4xx_response_still_logs_the_real_status_code(
 
 
 def test_upload_request_log_never_leaks_track_content(
-    caplog: pytest.LogCaptureFixture, synthetic_wav
+    caplog: pytest.LogCaptureFixture, synthetic_wav, authed_client: AuthedClient
 ) -> None:
-    headers = {"X-Dev-Tenant-Id": str(uuid.uuid4()), "X-Dev-User-Id": str(uuid.uuid4())}
+    client = authed_client.client
     with caplog.at_level(logging.INFO, logger="songbox.access"):
         with synthetic_wav.open("rb") as fh:
             client.post(
                 "/tracks/upload",
-                headers=headers,
                 data={"lane": "C", "pd_cc_source": "a very specific public domain source string"},
                 files={"file": ("tone.wav", fh, "audio/wav")},
             )
@@ -162,9 +158,7 @@ def test_unhandled_exception_still_logs_a_request_line(
     broken_client = TestClient(app, raise_server_exceptions=False)
     try:
         with caplog.at_level(logging.INFO, logger="songbox.access"):
-            response = broken_client.get(
-                "/tracks", headers={"X-Dev-Tenant-Id": "test", "X-Dev-User-Id": "test"}
-            )
+            response = broken_client.get("/tracks")
     finally:
         app.dependency_overrides.pop(get_identity, None)
 

@@ -6,14 +6,12 @@ import uuid
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
 
 from app.acoustid.client import FixtureAcoustIDClient
 from app.job_cost import estimate_cost_usd, track_job_cost
 from app.main import app
 from app.routes.tracks import get_acoustid_client
-
-client = TestClient(app)
+from tests.conftest import AuthedClient
 
 
 def test_estimate_cost_usd_returns_none_when_providers_empty(tmp_path: Path) -> None:
@@ -138,15 +136,14 @@ def test_track_job_cost_still_logs_when_the_wrapped_block_raises(
 
 
 def test_separate_endpoint_logs_a_real_gpu_job_cost_line(
-    caplog: pytest.LogCaptureFixture, synthetic_wav: Path
+    caplog: pytest.LogCaptureFixture, synthetic_wav: Path, authed_client: AuthedClient
 ) -> None:
-    headers = {"X-Dev-Tenant-Id": str(uuid.uuid4()), "X-Dev-User-Id": str(uuid.uuid4())}
+    client = authed_client.client
     app.dependency_overrides[get_acoustid_client] = lambda: FixtureAcoustIDClient({})
     try:
         with synthetic_wav.open("rb") as fh:
             upload_response = client.post(
                 "/tracks/upload",
-                headers=headers,
                 data={"lane": "A", "attestation_text": "I made this recording"},
                 files={"file": ("tone.wav", fh, "audio/wav")},
             )
@@ -154,7 +151,7 @@ def test_separate_endpoint_logs_a_real_gpu_job_cost_line(
         track_id = upload_response.json()["track_id"]
 
         with caplog.at_level(logging.INFO, logger="songbox.job_cost"):
-            separate_response = client.post(f"/tracks/{track_id}/separate", headers=headers)
+            separate_response = client.post(f"/tracks/{track_id}/separate")
         assert separate_response.status_code == 200
     finally:
         app.dependency_overrides.pop(get_acoustid_client, None)

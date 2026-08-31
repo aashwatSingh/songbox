@@ -12,24 +12,17 @@ from app.db import SessionLocal
 from app.main import app
 from app.models import Stem, Track
 from app.routes.tracks import get_acoustid_client
-
-client = TestClient(app)
-
-HEADERS = {
-    "X-Dev-Tenant-Id": str(uuid.uuid4()),
-    "X-Dev-User-Id": str(uuid.uuid4()),
-}
+from tests.conftest import AuthedClient
 
 TEST_ADMIN_KEY = "test-admin-key-for-pytest-only"
 
 
-def _upload_pass_and_separate_track(synthetic_wav: Path) -> str:
+def _upload_pass_and_separate_track(client: TestClient, synthetic_wav: Path) -> str:
     app.dependency_overrides[get_acoustid_client] = lambda: FixtureAcoustIDClient({})
     try:
         with synthetic_wav.open("rb") as fh:
             response = client.post(
                 "/tracks/upload",
-                headers=HEADERS,
                 data={"lane": "A", "attestation_text": "I made this recording"},
                 files={"file": ("tone.wav", fh, "audio/wav")},
             )
@@ -39,14 +32,15 @@ def _upload_pass_and_separate_track(synthetic_wav: Path) -> str:
     assert response.json()["status"] == "passed"
     track_id = response.json()["track_id"]
 
-    separate_response = client.post(f"/tracks/{track_id}/separate", headers=HEADERS)
+    separate_response = client.post(f"/tracks/{track_id}/separate")
     assert separate_response.status_code == 200
     return track_id
 
 
 def test_takedown_rejects_missing_admin_key(
-    monkeypatch: pytest.MonkeyPatch, synthetic_wav: Path
+    monkeypatch: pytest.MonkeyPatch, synthetic_wav: Path, authed_client: AuthedClient
 ) -> None:
+    client = authed_client.client
     monkeypatch.setenv("ADMIN_API_KEY", TEST_ADMIN_KEY)
 
     def _fail_if_called(*args: object, **kwargs: object) -> object:
@@ -54,7 +48,7 @@ def test_takedown_rejects_missing_admin_key(
 
     monkeypatch.setattr("app.routes.admin.delete_track_content", _fail_if_called)
 
-    track_id = _upload_pass_and_separate_track(synthetic_wav)
+    track_id = _upload_pass_and_separate_track(client, synthetic_wav)
 
     response = client.post(f"/admin/tracks/{track_id}/takedown", json={"reason": "test"})
 
@@ -62,8 +56,9 @@ def test_takedown_rejects_missing_admin_key(
 
 
 def test_takedown_rejects_wrong_admin_key(
-    monkeypatch: pytest.MonkeyPatch, synthetic_wav: Path
+    monkeypatch: pytest.MonkeyPatch, synthetic_wav: Path, authed_client: AuthedClient
 ) -> None:
+    client = authed_client.client
     monkeypatch.setenv("ADMIN_API_KEY", TEST_ADMIN_KEY)
 
     def _fail_if_called(*args: object, **kwargs: object) -> object:
@@ -71,7 +66,7 @@ def test_takedown_rejects_wrong_admin_key(
 
     monkeypatch.setattr("app.routes.admin.delete_track_content", _fail_if_called)
 
-    track_id = _upload_pass_and_separate_track(synthetic_wav)
+    track_id = _upload_pass_and_separate_track(client, synthetic_wav)
 
     response = client.post(
         f"/admin/tracks/{track_id}/takedown",
@@ -83,8 +78,9 @@ def test_takedown_rejects_wrong_admin_key(
 
 
 def test_takedown_fails_closed_when_admin_key_not_configured(
-    monkeypatch: pytest.MonkeyPatch, synthetic_wav: Path
+    monkeypatch: pytest.MonkeyPatch, synthetic_wav: Path, authed_client: AuthedClient
 ) -> None:
+    client = authed_client.client
     monkeypatch.delenv("ADMIN_API_KEY", raising=False)
 
     def _fail_if_called(*args: object, **kwargs: object) -> object:
@@ -94,7 +90,7 @@ def test_takedown_fails_closed_when_admin_key_not_configured(
 
     monkeypatch.setattr("app.routes.admin.delete_track_content", _fail_if_called)
 
-    track_id = _upload_pass_and_separate_track(synthetic_wav)
+    track_id = _upload_pass_and_separate_track(client, synthetic_wav)
 
     response = client.post(
         f"/admin/tracks/{track_id}/takedown",
@@ -105,7 +101,10 @@ def test_takedown_fails_closed_when_admin_key_not_configured(
     assert response.status_code == 500
 
 
-def test_takedown_404s_for_unknown_track(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_takedown_404s_for_unknown_track(
+    monkeypatch: pytest.MonkeyPatch, authed_client: AuthedClient
+) -> None:
+    client = authed_client.client
     monkeypatch.setenv("ADMIN_API_KEY", TEST_ADMIN_KEY)
 
     def _fail_if_called(*args: object, **kwargs: object) -> object:
@@ -123,10 +122,11 @@ def test_takedown_404s_for_unknown_track(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_takedown_creates_tombstone_and_removes_content_across_tenants(
-    monkeypatch: pytest.MonkeyPatch, synthetic_wav: Path
+    monkeypatch: pytest.MonkeyPatch, synthetic_wav: Path, authed_client: AuthedClient
 ) -> None:
+    client = authed_client.client
     monkeypatch.setenv("ADMIN_API_KEY", TEST_ADMIN_KEY)
-    track_id = _upload_pass_and_separate_track(synthetic_wav)
+    track_id = _upload_pass_and_separate_track(client, synthetic_wav)
 
     # This request carries NO X-Dev-Tenant-Id at all -- proving the endpoint reaches across
     # tenants by design (via the admin key alone), not by accident.

@@ -15,22 +15,15 @@ from app.main import app
 from app.models import FingerprintMatch, KaraokePackage, Stem, Track, Transcription
 from app.routes.tracks import get_acoustid_client
 from app.storage import fetch_track_file, get_minio_client
-
-client = TestClient(app)
-
-HEADERS = {
-    "X-Dev-Tenant-Id": str(uuid.uuid4()),
-    "X-Dev-User-Id": str(uuid.uuid4()),
-}
+from tests.conftest import AuthedClient
 
 
-def _upload_pass_and_separate_track(synthetic_wav: Path) -> str:
+def _upload_pass_and_separate_track(client: TestClient, synthetic_wav: Path) -> str:
     app.dependency_overrides[get_acoustid_client] = lambda: FixtureAcoustIDClient({})
     try:
         with synthetic_wav.open("rb") as fh:
             response = client.post(
                 "/tracks/upload",
-                headers=HEADERS,
                 data={"lane": "A", "attestation_text": "I made this recording"},
                 files={"file": ("tone.wav", fh, "audio/wav")},
             )
@@ -40,18 +33,18 @@ def _upload_pass_and_separate_track(synthetic_wav: Path) -> str:
     assert response.json()["status"] == "passed"
     track_id = response.json()["track_id"]
 
-    separate_response = client.post(f"/tracks/{track_id}/separate", headers=HEADERS)
+    separate_response = client.post(f"/tracks/{track_id}/separate")
     assert separate_response.status_code == 200
     return track_id
 
 
-def _insert_transcription_and_package(track_id: str) -> None:
-    session = db_session_for_tenant(uuid.UUID(HEADERS["X-Dev-Tenant-Id"]))
+def _insert_transcription_and_package(track_id: str, tenant_id: uuid.UUID) -> None:
+    session = db_session_for_tenant(tenant_id)
     try:
         session.add(
             Transcription(
                 id=uuid.uuid4(),
-                tenant_id=uuid.UUID(HEADERS["X-Dev-Tenant-Id"]),
+                tenant_id=tenant_id,
                 track_id=uuid.UUID(track_id),
                 whisper_model="base",
                 aligner="wav2vec2",
@@ -66,7 +59,7 @@ def _insert_transcription_and_package(track_id: str) -> None:
         session.add(
             KaraokePackage(
                 id=uuid.uuid4(),
-                tenant_id=uuid.UUID(HEADERS["X-Dev-Tenant-Id"]),
+                tenant_id=tenant_id,
                 track_id=uuid.UUID(track_id),
                 schema_version=1,
                 words=[
@@ -86,10 +79,11 @@ def _insert_transcription_and_package(track_id: str) -> None:
 
 
 def test_delete_track_content_removes_rows_and_storage_but_not_the_track(
-    synthetic_wav: Path,
+    synthetic_wav: Path, authed_client: AuthedClient
 ) -> None:
-    track_id = _upload_pass_and_separate_track(synthetic_wav)
-    _insert_transcription_and_package(track_id)
+    client = authed_client.client
+    track_id = _upload_pass_and_separate_track(client, synthetic_wav)
+    _insert_transcription_and_package(track_id, authed_client.tenant_id)
 
     minio_client = get_minio_client()
     session = SessionLocal()
