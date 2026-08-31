@@ -690,7 +690,9 @@ client = TestClient(app)
 
 
 def _unique_email() -> str:
-    return f"{uuid.uuid4()}@example.test"
+    # NOT @example.test -- email-validator (which EmailStr delegates to) permanently rejects RFC
+    # 2606's reserved .test TLD; .com is required for real EmailStr validation to pass.
+    return f"{uuid.uuid4()}@example.com"
 
 
 def test_signup_creates_a_real_account_and_sets_a_session_cookie() -> None:
@@ -1136,7 +1138,12 @@ def sign_up(client: TestClient, *, email: str | None = None) -> AuthedClient:
     prove cross-tenant isolation).
     """
     if email is None:
-        email = f"{uuid.uuid4()}@example.test"
+        # NOT @example.test -- RFC 2606 reserves .test as a special-use TLD, and the
+        # email-validator package pydantic's EmailStr delegates to permanently rejects it as
+        # undeliverable regardless of configuration. Task 3's implementer discovered this the hard
+        # way (every real signup call 422'd); .com is the correct choice for synthetic test emails
+        # that must pass real EmailStr validation.
+        email = f"{uuid.uuid4()}@example.com"
     response = client.post("/auth/signup", json={"email": email, "password": _TEST_PASSWORD})
     assert response.status_code == 200, response.text
     body = response.json()
