@@ -7,7 +7,12 @@ from sqlalchemy import text
 from app.db import SessionLocal, db_session_for_tenant
 from app.models import Base
 
-RLS_TABLES = tuple(Base.metadata.tables.keys())
+# users/sessions are deliberately excluded from row-level security -- they're the identity
+# substrate RLS depends on (how a request's tenant is even discovered), not tenant content. See
+# alembic/versions/0009_add_users_and_sessions.py's upgrade() comment for the full reasoning.
+RLS_TABLES = tuple(
+    name for name in Base.metadata.tables.keys() if name not in ("users", "sessions")
+)
 
 
 def test_every_table_has_row_level_security_enabled_and_forced() -> None:
