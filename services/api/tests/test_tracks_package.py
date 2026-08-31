@@ -14,22 +14,15 @@ from app.fingerprint import fingerprint_audio
 from app.main import app
 from app.models import Transcription
 from app.routes.tracks import get_acoustid_client
-
-client = TestClient(app)
-
-HEADERS = {
-    "X-Dev-Tenant-Id": str(uuid.uuid4()),
-    "X-Dev-User-Id": str(uuid.uuid4()),
-}
+from tests.conftest import AuthedClient
 
 
-def _upload_pass_and_separate_track(synthetic_wav: Path) -> str:
+def _upload_pass_and_separate_track(client: TestClient, synthetic_wav: Path) -> str:
     app.dependency_overrides[get_acoustid_client] = lambda: FixtureAcoustIDClient({})
     try:
         with synthetic_wav.open("rb") as fh:
             response = client.post(
                 "/tracks/upload",
-                headers=HEADERS,
                 data={"lane": "A", "attestation_text": "I made this recording"},
                 files={"file": ("tone.wav", fh, "audio/wav")},
             )
@@ -39,18 +32,20 @@ def _upload_pass_and_separate_track(synthetic_wav: Path) -> str:
     assert response.json()["status"] == "passed"
     track_id = response.json()["track_id"]
 
-    separate_response = client.post(f"/tracks/{track_id}/separate", headers=HEADERS)
+    separate_response = client.post(f"/tracks/{track_id}/separate")
     assert separate_response.status_code == 200
     return track_id
 
 
-def _insert_transcription(track_id: str, *, lyrics_display_allowed: bool = True) -> None:
-    session = db_session_for_tenant(uuid.UUID(HEADERS["X-Dev-Tenant-Id"]))
+def _insert_transcription(
+    track_id: str, tenant_id: uuid.UUID, *, lyrics_display_allowed: bool = True
+) -> None:
+    session = db_session_for_tenant(tenant_id)
     try:
         session.add(
             Transcription(
                 id=uuid.uuid4(),
-                tenant_id=uuid.UUID(HEADERS["X-Dev-Tenant-Id"]),
+                tenant_id=tenant_id,
                 track_id=uuid.UUID(track_id),
                 whisper_model="base",
                 aligner="wav2vec2",
@@ -69,12 +64,13 @@ def _insert_transcription(track_id: str, *, lyrics_display_allowed: bool = True)
 
 
 def test_package_stores_a_karaoke_package_with_real_pitch_and_structure(
-    synthetic_wav: Path,
+    synthetic_wav: Path, authed_client: AuthedClient
 ) -> None:
-    track_id = _upload_pass_and_separate_track(synthetic_wav)
-    _insert_transcription(track_id)
+    client = authed_client.client
+    track_id = _upload_pass_and_separate_track(client, synthetic_wav)
+    _insert_transcription(track_id, authed_client.tenant_id)
 
-    response = client.post(f"/tracks/{track_id}/package", headers=HEADERS)
+    response = client.post(f"/tracks/{track_id}/package")
 
     assert response.status_code == 200
     body = response.json()
@@ -85,7 +81,7 @@ def test_package_stores_a_karaoke_package_with_real_pitch_and_structure(
     assert len(body["sections_ms"]) > 0
     assert [w["text"] for w in body["words"]] == ["hello", "world"]
 
-    session = db_session_for_tenant(uuid.UUID(HEADERS["X-Dev-Tenant-Id"]))
+    session = db_session_for_tenant(authed_client.tenant_id)
     try:
         rows = session.execute(
             __import__("sqlalchemy").text(
@@ -102,12 +98,13 @@ def test_package_stores_a_karaoke_package_with_real_pitch_and_structure(
 
 
 def test_package_nulls_word_text_when_lyrics_display_is_not_allowed(
-    synthetic_wav: Path,
+    synthetic_wav: Path, authed_client: AuthedClient
 ) -> None:
-    track_id = _upload_pass_and_separate_track(synthetic_wav)
-    _insert_transcription(track_id, lyrics_display_allowed=False)
+    client = authed_client.client
+    track_id = _upload_pass_and_separate_track(client, synthetic_wav)
+    _insert_transcription(track_id, authed_client.tenant_id, lyrics_display_allowed=False)
 
-    response = client.post(f"/tracks/{track_id}/package", headers=HEADERS)
+    response = client.post(f"/tracks/{track_id}/package")
 
     assert response.status_code == 200
     body = response.json()
@@ -119,7 +116,7 @@ def test_package_nulls_word_text_when_lyrics_display_is_not_allowed(
         assert word["confidence"] is not None
         assert word["idx"] is not None
 
-    session = db_session_for_tenant(uuid.UUID(HEADERS["X-Dev-Tenant-Id"]))
+    session = db_session_for_tenant(authed_client.tenant_id)
     try:
         rows = session.execute(
             __import__("sqlalchemy").text(
@@ -141,8 +138,10 @@ def test_package_nulls_word_text_when_lyrics_display_is_not_allowed(
 
 
 def test_package_rejects_track_that_has_not_passed_the_gate(
-    monkeypatch: pytest.MonkeyPatch, synthetic_wav: Path
+    monkeypatch: pytest.MonkeyPatch, synthetic_wav: Path, authed_client: AuthedClient
 ) -> None:
+    client = authed_client.client
+
     def _fail_if_called(*args: object, **kwargs: object) -> object:
         raise AssertionError("build_package must not be called for a track that hasn't passed")
 
@@ -160,7 +159,6 @@ def test_package_rejects_track_that_has_not_passed_the_gate(
         with synthetic_wav.open("rb") as fh:
             upload_response = client.post(
                 "/tracks/upload",
-                headers=HEADERS,
                 data={"lane": "A", "attestation_text": "I made this recording"},
                 files={"file": ("tone.wav", fh, "audio/wav")},
             )
@@ -169,14 +167,16 @@ def test_package_rejects_track_that_has_not_passed_the_gate(
     assert upload_response.json()["status"] == "pending_review"
     track_id = upload_response.json()["track_id"]
 
-    response = client.post(f"/tracks/{track_id}/package", headers=HEADERS)
+    response = client.post(f"/tracks/{track_id}/package")
 
     assert response.status_code == 409
 
 
 def test_package_rejects_track_missing_a_stem(
-    monkeypatch: pytest.MonkeyPatch, synthetic_wav: Path
+    monkeypatch: pytest.MonkeyPatch, synthetic_wav: Path, authed_client: AuthedClient
 ) -> None:
+    client = authed_client.client
+
     def _fail_if_called(*args: object, **kwargs: object) -> object:
         raise AssertionError("build_package must not be called when stems are missing")
 
@@ -187,7 +187,6 @@ def test_package_rejects_track_missing_a_stem(
         with synthetic_wav.open("rb") as fh:
             upload_response = client.post(
                 "/tracks/upload",
-                headers=HEADERS,
                 data={"lane": "A", "attestation_text": "I made this recording"},
                 files={"file": ("tone.wav", fh, "audio/wav")},
             )
@@ -196,39 +195,42 @@ def test_package_rejects_track_missing_a_stem(
     track_id = upload_response.json()["track_id"]
     # Not separated -- no stems exist at all.
 
-    response = client.post(f"/tracks/{track_id}/package", headers=HEADERS)
+    response = client.post(f"/tracks/{track_id}/package")
 
     assert response.status_code == 409
 
 
 def test_package_rejects_track_with_no_transcription(
-    monkeypatch: pytest.MonkeyPatch, synthetic_wav: Path
+    monkeypatch: pytest.MonkeyPatch, synthetic_wav: Path, authed_client: AuthedClient
 ) -> None:
+    client = authed_client.client
+
     def _fail_if_called(*args: object, **kwargs: object) -> object:
         raise AssertionError("build_package must not be called with no transcription to embed")
 
     monkeypatch.setattr("app.routes.tracks.build_package", _fail_if_called)
-    track_id = _upload_pass_and_separate_track(synthetic_wav)
+    track_id = _upload_pass_and_separate_track(client, synthetic_wav)
     # Separated, but /transcribe was never called.
 
-    response = client.post(f"/tracks/{track_id}/package", headers=HEADERS)
+    response = client.post(f"/tracks/{track_id}/package")
 
     assert response.status_code == 409
 
 
 def test_package_rejects_unknown_pitch_model(
-    monkeypatch: pytest.MonkeyPatch, synthetic_wav: Path
+    monkeypatch: pytest.MonkeyPatch, synthetic_wav: Path, authed_client: AuthedClient
 ) -> None:
+    client = authed_client.client
+
     def _fail_if_called(*args: object, **kwargs: object) -> object:
         raise AssertionError("build_package must not be called for an unrecognized pitch_model")
 
     monkeypatch.setattr("app.routes.tracks.build_package", _fail_if_called)
-    track_id = _upload_pass_and_separate_track(synthetic_wav)
-    _insert_transcription(track_id)
+    track_id = _upload_pass_and_separate_track(client, synthetic_wav)
+    _insert_transcription(track_id, authed_client.tenant_id)
 
     response = client.post(
         f"/tracks/{track_id}/package",
-        headers=HEADERS,
         json={"pitch_model": "not-a-real-model"},
     )
 

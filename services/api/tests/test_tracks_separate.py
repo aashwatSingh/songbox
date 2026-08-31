@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import tempfile
 import time
-import uuid
 import wave
 from pathlib import Path
 
@@ -17,22 +16,15 @@ from app.fingerprint import fingerprint_audio
 from app.main import app
 from app.routes.tracks import get_acoustid_client
 from app.storage import fetch_track_file, get_minio_client
-
-client = TestClient(app)
-
-HEADERS = {
-    "X-Dev-Tenant-Id": str(uuid.uuid4()),
-    "X-Dev-User-Id": str(uuid.uuid4()),
-}
+from tests.conftest import AuthedClient
 
 
-def _upload_and_pass_track(synthetic_wav: Path) -> str:
+def _upload_and_pass_track(client: TestClient, synthetic_wav: Path) -> str:
     app.dependency_overrides[get_acoustid_client] = lambda: FixtureAcoustIDClient({})
     try:
         with synthetic_wav.open("rb") as fh:
             response = client.post(
                 "/tracks/upload",
-                headers=HEADERS,
                 data={"lane": "A", "attestation_text": "I made this recording"},
                 files={"file": ("tone.wav", fh, "audio/wav")},
             )
@@ -43,10 +35,13 @@ def _upload_and_pass_track(synthetic_wav: Path) -> str:
     return response.json()["track_id"]
 
 
-def test_separate_stores_four_stems_for_a_passed_track(synthetic_wav: Path) -> None:
-    track_id = _upload_and_pass_track(synthetic_wav)
+def test_separate_stores_four_stems_for_a_passed_track(
+    synthetic_wav: Path, authed_client: AuthedClient
+) -> None:
+    client = authed_client.client
+    track_id = _upload_and_pass_track(client, synthetic_wav)
 
-    response = client.post(f"/tracks/{track_id}/separate", headers=HEADERS)
+    response = client.post(f"/tracks/{track_id}/separate")
 
     assert response.status_code == 200
     body = response.json()
@@ -60,7 +55,7 @@ def test_separate_stores_four_stems_for_a_passed_track(synthetic_wav: Path) -> N
     # storage key, byte-for-byte content) rather than just the DB rows and key prefix.
     minio_client = get_minio_client()
     for stem in body["stems"]:
-        assert stem["storage_key"].startswith(f"{HEADERS['X-Dev-Tenant-Id']}/")
+        assert stem["storage_key"].startswith(f"{authed_client.tenant_id}/")
         stem_bytes = fetch_track_file(minio_client, stem["storage_key"])
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             tmp.write(stem_bytes)
@@ -74,7 +69,7 @@ def test_separate_stores_four_stems_for_a_passed_track(synthetic_wav: Path) -> N
         finally:
             tmp_path.unlink(missing_ok=True)
 
-    session = db_session_for_tenant(uuid.UUID(HEADERS["X-Dev-Tenant-Id"]))
+    session = db_session_for_tenant(authed_client.tenant_id)
     try:
         rows = session.execute(
             text("SELECT stem_type, model_name FROM stems WHERE track_id = :track_id"),
@@ -87,8 +82,10 @@ def test_separate_stores_four_stems_for_a_passed_track(synthetic_wav: Path) -> N
 
 
 def test_separate_rejects_track_that_has_not_passed_the_gate(
-    monkeypatch: pytest.MonkeyPatch, synthetic_wav: Path
+    monkeypatch: pytest.MonkeyPatch, synthetic_wav: Path, authed_client: AuthedClient
 ) -> None:
+    client = authed_client.client
+
     def _fail_if_called(*args: object, **kwargs: object) -> dict[str, Path]:
         raise AssertionError("separate_audio must not be called for a track that hasn't passed")
 
@@ -102,7 +99,6 @@ def test_separate_rejects_track_that_has_not_passed_the_gate(
         with synthetic_wav.open("rb") as fh:
             upload_response = client.post(
                 "/tracks/upload",
-                headers=HEADERS,
                 data={"lane": "A", "attestation_text": "I made this recording"},
                 files={"file": ("tone.wav", fh, "audio/wav")},
             )
@@ -111,23 +107,24 @@ def test_separate_rejects_track_that_has_not_passed_the_gate(
     assert upload_response.json()["status"] == "pending_review"
     track_id = upload_response.json()["track_id"]
 
-    response = client.post(f"/tracks/{track_id}/separate", headers=HEADERS)
+    response = client.post(f"/tracks/{track_id}/separate")
 
     assert response.status_code == 409
 
 
 def test_separate_rejects_unknown_model_name(
-    monkeypatch: pytest.MonkeyPatch, synthetic_wav: Path
+    monkeypatch: pytest.MonkeyPatch, synthetic_wav: Path, authed_client: AuthedClient
 ) -> None:
+    client = authed_client.client
+
     def _fail_if_called(*args: object, **kwargs: object) -> dict[str, Path]:
         raise AssertionError("separate_audio must not be called for an unrecognized model_name")
 
     monkeypatch.setattr("app.routes.tracks.separate_audio", _fail_if_called)
-    track_id = _upload_and_pass_track(synthetic_wav)
+    track_id = _upload_and_pass_track(client, synthetic_wav)
 
     response = client.post(
         f"/tracks/{track_id}/separate",
-        headers=HEADERS,
         json={"model_name": "not-a-real-model"},
     )
 
@@ -135,12 +132,13 @@ def test_separate_rejects_unknown_model_name(
 
 
 def test_separate_returns_504_when_separation_exceeds_the_wall_clock_timeout(
-    monkeypatch: pytest.MonkeyPatch, synthetic_wav: Path
+    monkeypatch: pytest.MonkeyPatch, synthetic_wav: Path, authed_client: AuthedClient
 ) -> None:
     # Shrink the timeout to something the test can actually wait out, and make the (monkeypatched)
     # separate_audio() sleep past it -- this exercises the real Thread.join(timeout=...) path in
     # _separate_audio_with_timeout() without the test needing to wait anywhere near the real
     # SEPARATION_TIMEOUT_SECONDS (1800s) production value.
+    client = authed_client.client
     monkeypatch.setattr("app.routes.tracks.SEPARATION_TIMEOUT_SECONDS", 0.05)
 
     def _slow_separate(*args: object, **kwargs: object) -> dict[str, Path]:
@@ -148,8 +146,8 @@ def test_separate_returns_504_when_separation_exceeds_the_wall_clock_timeout(
         return {}
 
     monkeypatch.setattr("app.routes.tracks.separate_audio", _slow_separate)
-    track_id = _upload_and_pass_track(synthetic_wav)
+    track_id = _upload_and_pass_track(client, synthetic_wav)
 
-    response = client.post(f"/tracks/{track_id}/separate", headers=HEADERS)
+    response = client.post(f"/tracks/{track_id}/separate")
 
     assert response.status_code == 504
