@@ -24,6 +24,7 @@ dependencies = [
     "slowapi>=0.1.10",
     "redis>=5.0",
     "pyyaml>=6.0",
+    "argon2-cffi>=23.1",
 ]
 
 [project.optional-dependencies]
