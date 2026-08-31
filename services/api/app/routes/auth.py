@@ -112,7 +112,9 @@ def login(request: Request, body: LoginRequest, response: Response) -> AuthRespo
 
 
 @router.post("/logout")
+@limiter.limit("10/minute")
 def logout(
+    request: Request,
     response: Response,
     songbox_session: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
 ) -> dict[str, str]:

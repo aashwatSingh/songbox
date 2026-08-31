@@ -64,9 +64,10 @@ What was built:
   session cookie, tampered/garbage session cookie, and a real end-to-end RLS check that two
   independently signed-up users cannot see each other's tracks through the real auth path (not just
   through the old dev-header mechanism the existing RLS tests already covered).
-- **Full local suite (post final-review fix round): see this round's actual pytest output** in
-  `.superpowers/sdd/final-review-fix-report.md` for the exact passed/skipped counts, run twice
-  consecutively to prove the test-isolation bug below is genuinely fixed, not just documented.
+- **Full local suite (post final-review fix round): 181 passed, 2 skipped, 0 failed** -- run twice
+  consecutively (same result both times) specifically to prove the test-isolation bug described
+  below is genuinely fixed, not just documented. The 2 skips are the `SONGBOX_MODAL_LIVE_TESTS`-gated
+  Modal tests, unrelated to auth.
 
 **A real finding, caught mid-implementation and fixed before it could repeat:** Task 3's
 implementer discovered `@example.test` email addresses (used throughout the plan's own worked
@@ -96,8 +97,9 @@ found real issues no single per-task diff could see. Fixed before merge:
   actual lack of a Postgres `GRANT` on `users`/`sessions` (the earlier test only proved they lack an
   RLS policy, which is not the same claim), and `citext`'s case-insensitive email collision behavior
   at both signup and login.
-- **The `test_expired_session_returns_401` test-isolation bug (below) is fixed**, not just
-  documented -- see this round's own report for the two-consecutive-runs proof.
+- **The `test_expired_session_returns_401` test-isolation bug is fixed**, not just documented --
+  it hardcoded a non-unique session token, failing on a second consecutive full-suite run; now
+  generates a fresh unique token per run. The two-consecutive-runs pytest result above is the proof.
 - Frontend: the `/tracks` logout button now awaits `logout()` and calls `AuthContext`'s `refresh()`
   before navigating (previously left stale client-side auth state and an unhandled promise
   rejection on failure), and the tracks-fetching effect is now gated on `user !== null` so an

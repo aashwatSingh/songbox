@@ -69,7 +69,9 @@ def test_songbox_app_role_has_no_grant_on_users() -> None:
     # enforcing test the moment the first table lands" rule.
     session = AppSessionLocal()
     try:
-        with pytest.raises(DBAPIError):
+        # match= keeps this from passing vacuously on an unrelated DBAPIError (e.g. a bad
+        # APP_DATABASE_URL failing to connect at all) -- it must be the real permission denial.
+        with pytest.raises(DBAPIError, match="permission denied"):
             session.execute(text("SELECT 1 FROM users"))
     finally:
         session.rollback()
@@ -79,7 +81,7 @@ def test_songbox_app_role_has_no_grant_on_users() -> None:
 def test_songbox_app_role_has_no_grant_on_sessions() -> None:
     session = AppSessionLocal()
     try:
-        with pytest.raises(DBAPIError):
+        with pytest.raises(DBAPIError, match="permission denied"):
             session.execute(text("SELECT 1 FROM sessions"))
     finally:
         session.rollback()

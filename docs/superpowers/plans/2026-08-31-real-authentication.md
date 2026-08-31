@@ -263,7 +263,7 @@ def test_a_user_and_session_row_can_be_inserted_and_read_back() -> None:
         user = User(
             id=uuid.uuid4(),
             tenant_id=uuid.uuid4(),
-            email=f"{uuid.uuid4()}@example.test",
+            email=f"{uuid.uuid4()}@example.com",
             password_hash="not-a-real-hash-just-schema-test",
             created_at=datetime.now(UTC),
         )
@@ -393,7 +393,7 @@ def _make_user() -> User:
         user = User(
             id=uuid.uuid4(),
             tenant_id=uuid.uuid4(),
-            email=f"{uuid.uuid4()}@example.test",
+            email=f"{uuid.uuid4()}@example.com",
             password_hash=hash_password("correct horse battery staple"),
             created_at=datetime.now(UTC),
         )
