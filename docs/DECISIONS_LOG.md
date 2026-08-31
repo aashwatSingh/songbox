@@ -55,3 +55,28 @@ pre/post-fix benchmark runs, but a real precision change worth naming rather tha
 Chosen over the alternative (drop `block_network=True` from
 `run_package` too, matching `run_separate`) because the fix here is cheap and keeps the stronger
 guarantee, rather than conceding a second function to the same weaker posture as the first.
+
+## 2026-08-31 — Session cookies over JWT; `users`/`sessions` outside RLS
+
+M8's real-authentication design (`docs/superpowers/specs/2026-08-31-real-authentication-design.md`)
+needed a session mechanism to replace the dev-only header stub. Chose DB-backed opaque httpOnly
+cookies (`services/api/app/auth.py`: a random `secrets.token_urlsafe(32)` token, only its `sha256`
+hash ever persisted in a new `sessions` table) over a signed JWT, specifically for server-side
+revocability without a blocklist: logout is a single `DELETE` of the session row and takes effect on
+the very next request. A JWT would need either short-lived tokens with a refresh dance or a separate
+blocklist of revoked-but-unexpired tokens to get the same property — real infrastructure this
+project doesn't need, since nothing here distributes verification across multiple independently-
+trusted services (the actual reason JWTs earn their complexity). The accepted cost is one extra
+database lookup per authenticated request, not benchmarked against real load.
+
+Separately, `users` and `sessions` (migration `0009_add_users_and_sessions.py`) were deliberately
+left outside Postgres row-level security — and, further, the restricted `songbox_app` role was
+given no grant on them at all, so only the unrestricted `songbox` role can read/write them. This
+isn't an oversight in an otherwise-RLS-everywhere schema (`CLAUDE.md`: "every table must carry
+`tenant_id`, and every query must filter on it"); it's the same documented exception category
+`app/db.py`'s `get_admin_db()` already uses for cross-tenant operations. RLS scopes access to
+tenant *content* once a request's tenant is already known — `users`/`sessions` are the substrate
+that establishes which tenant a request belongs to in the first place, so `app/auth.py`'s
+`get_identity()` has to look them up as the unrestricted role or every request would fail before
+identity is even established. Full reasoning for both decisions: `docs/adr/
+0002-authentication-model.md`.

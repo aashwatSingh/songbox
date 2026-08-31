@@ -182,19 +182,34 @@ milestone reaches them):
    which fix will work before trying it. Not a blocker for M4b/M5; should land before M6's word-
    highlight UX depends on tight timing.
 
-9. **New in M4b.** No milestone anywhere in this plan scopes real authentication. Every endpoint
-   across M1-M4a and M4b's new ones (`GET /tracks`, `POST /tracks/{id}/realign`) still
-   authenticates via the dev-only `X-Dev-Tenant-Id`/`X-Dev-User-Id` header stub introduced in M1
-   (see `docs/STATUS.md`'s M1 "Deliberately deferred" section) -- there is still no real identity
+9. **New in M4b. Resolved in M8** -- No milestone anywhere in this plan scoped real authentication.
+   Every endpoint across M1-M4a and M4b's new ones (`GET /tracks`, `POST /tracks/{id}/realign`)
+   authenticated via the dev-only `X-Dev-Tenant-Id`/`X-Dev-User-Id` header stub introduced in M1
+   (see `docs/STATUS.md`'s M1 "Deliberately deferred" section) -- there was no real identity
    provider, session, or credential check anywhere in this codebase. M4b made this stub reachable
    from a browser for the first time: `apps/web/lib/api.ts`'s dev-only client-side identity
-   generates a random tenant/user UUID pair on first load, stores it in `localStorage`, and sends
+   generated a random tenant/user UUID pair on first load, stored it in `localStorage`, and sent
    it as those same two headers on every request -- previously only curl and pytest ever exercised
-   this path. This is explicitly NOT real auth (documented as such at that call site) and changes
-   nothing about the underlying gap: anyone who can reach the API can set those headers to any
-   tenant ID they choose. When does a real milestone replace the stub, and what's the actual auth
-   model (identity provider, tenant provisioning, migration path for existing dev-stub data)?
-   Genuinely open -- not silently assumed solved.
+   this path. This was explicitly NOT real auth (documented as such at that call site) and changed
+   nothing about the underlying gap: anyone who could reach the API could set those headers to any
+   tenant ID they chose. **M8 (`docs/adr/0002-authentication-model.md`,
+   `docs/superpowers/specs/2026-08-31-real-authentication-design.md`) replaced the stub**: real
+   email+password signup/login, argon2id password hashing, DB-backed opaque httpOnly session
+   cookies (not JWTs) with a fixed 30-day expiry, one user per tenant. `get_identity()`'s external
+   interface (the `Identity(tenant_id, user_id)` dataclass every route and `get_db()`'s RLS wiring
+   consumes) did not change -- only its internals, from header-trust to session-cookie
+   verification. The `users`/`sessions` tables are deliberately outside Postgres row-level security
+   (they're the identity substrate RLS depends on, not tenant content) and the restricted
+   `songbox_app` role has no grant on them at all. Real, tracked non-goals: no OAuth, no
+   teams/roles, no email verification, no password reset, no dev-stub data migration, no admin role
+   folded into user accounts (`X-Admin-Key` untouched). Two real, honest gaps ship with this
+   milestone rather than being hidden -- see the ADR's Consequences section and
+   `docs/STATUS.md`'s M8 entry: a timing side-channel in `login()`'s unknown-email branch (skips
+   argon2 verification, so it's measurably faster than a wrong-password rejection, despite an
+   identical response body), and a test-isolation bug in
+   `tests/test_auth.py::test_expired_session_returns_401` (no cleanup of the session row it
+   inserts, so it fails on a second consecutive full-suite run against the persistent test
+   database). Neither is fixed by this milestone.
 
 10. **New in M5. Read-path resolved in M6a** -- `docs/PLAN.md`'s original M5 entry called for
     "`karaoke.json` v1 emitted and schema-validated," but the approved M5 design spec

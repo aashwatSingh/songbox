@@ -1,6 +1,99 @@
 # Status
 
-Last updated: 2026-08-30.
+Last updated: 2026-08-31.
+
+## Done — M8 complete
+
+M8's scope (`docs/superpowers/specs/2026-08-31-real-authentication-design.md`, closing
+`docs/PLAN.md` open question 9): replace the dev-only `X-Dev-Tenant-Id`/`X-Dev-User-Id` header stub
+every endpoint since M1 trusted verbatim with real email+password authentication. Full reasoning
+for every decision below lives in `docs/adr/0002-authentication-model.md`.
+
+What was built:
+- **`users` and `sessions` tables** (migration `services/api/alembic/versions/
+  0009_add_users_and_sessions.py`), deliberately outside Postgres row-level security and, further,
+  with no grant at all to the restricted `songbox_app` role -- only the unrestricted `songbox` role
+  can read/write them. `email` uses Postgres's `citext` extension for case-insensitive uniqueness
+  without application-layer lowercasing. `SQLAlchemy` models added as `User` and `UserSession` (not
+  `Session` -- collides with SQLAlchemy's own `Session` class already imported throughout this
+  codebase) in `services/api/app/models.py`.
+- **Argon2id password hashing** (`argon2-cffi`'s `PasswordHasher`, default parameters, new
+  dependency in `services/api/pyproject.toml`) and **DB-backed opaque session cookies** --
+  `services/api/app/auth.py`'s `create_session()`/`get_identity()` rewritten: a random
+  `secrets.token_urlsafe(32)` token is set as an httpOnly `songbox_session` cookie, and only its
+  `sha256` hash is ever persisted in `sessions.token_hash`, so a database read alone can never
+  reproduce a valid cookie. Fixed 30-day expiry from creation, no sliding-window renewal.
+  `get_identity()`'s external interface -- the `Identity(tenant_id, user_id)` dataclass every route
+  and `get_db()`'s RLS wiring already consumed as an opaque input -- did not change; only its
+  internals did, from trusting a header to verifying a session cookie against the database. No
+  existing track/admin route handler needed to change.
+- **`POST /auth/signup`, `POST /auth/login`, `POST /auth/logout`, `GET /auth/me`**
+  (`services/api/app/routes/auth.py`, new). Signup auto-provisions a fresh `tenant_id` per user --
+  one user per tenant, no teams/invites/roles. Duplicate email at signup: `409`. Wrong password and
+  unknown email at login both return the same generic `401` message
+  (`_GENERIC_LOGIN_FAILURE = "invalid email or password"`) -- but see the timing-side-channel gap
+  below; the response body is identical, the code path to reach it is not. `allow_credentials=True`
+  added to `services/api/app/main.py`'s existing `CORSMiddleware` (already scoped to
+  `http://localhost:3000`, not `"*"`, so this is a compatible addition, not a loosening).
+- **Frontend migrated off client-generated dev identity.** `apps/web/lib/api.ts`'s
+  `getDevIdentity()`/`getDevIdentityHeaders()` (the `localStorage`-based random tenant/user UUID
+  generator flagged as explicitly-not-real-auth since M4b, `docs/PLAN.md` open question 9) deleted;
+  `apiFetch()` now sends `credentials: "include"` so the session cookie travels automatically. New
+  `signup()`/`login()`/`logout()`/`me()` wrappers, a new `AuthContext`/`useAuth()` context
+  (`apps/web/lib/AuthContext.tsx`) wrapping the app in `apps/web/app/layout.tsx`, and new
+  `apps/web/app/login/page.tsx` / `apps/web/app/signup/page.tsx` pages. Pages under `/tracks`
+  redirect to `/login` when unauthenticated; a logout control was added to the app's nav.
+- **Real end-to-end browser verification**, performed directly by the controller (not a subagent),
+  all 8 checklist items passing: unauthenticated `/tracks` redirects to `/login`; signup succeeds
+  and redirects to `/tracks`; identity flows correctly to protected API calls (verified via a real
+  `GET /tracks` 401-to-200 transition and `GET /auth/me` returning the actual signed-up identity --
+  this frontend has no upload UI, so upload itself could not be literally re-exercised this way);
+  logout redirects and re-redirects on direct navigation; re-login with the same credentials returns
+  to the same account; duplicate-email signup surfaces a real visible error; wrong-password login
+  surfaces a real visible generic error; the session cookie was confirmed httpOnly
+  (`document.cookie` empty) and `localStorage` was confirmed clean of the old dev-identity keys. No
+  real application bugs were found during this pass.
+- **Test suite migrated off dev headers.** 18 existing test files that set
+  `X-Dev-Tenant-Id`/`X-Dev-User-Id` headers directly against a `TestClient` were migrated to a new
+  `authed_client` fixture (`services/api/tests/conftest.py`) that signs up and logs in a real user,
+  returning a `TestClient` whose cookie jar already carries the session -- real, non-trivial
+  migration work across the suite, not hand-waved. New tests specific to this milestone
+  (`services/api/tests/test_auth_routes.py`, `test_users_sessions_schema.py`, additions to
+  `test_auth.py`) cover signup/login/logout/me happy paths, wrong password, duplicate email, expired
+  session cookie, tampered/garbage session cookie, and a real end-to-end RLS check that two
+  independently signed-up users cannot see each other's tracks through the real auth path (not just
+  through the old dev-header mechanism the existing RLS tests already covered).
+- **Full local suite: 171 passed, 2 skipped** (the gated `SONGBOX_MODAL_LIVE_TESTS` Modal tests from
+  M7c, unrelated to auth), **1 known pre-existing failure**, documented below rather than hidden.
+
+**A real finding, caught mid-implementation and fixed before it could repeat:** Task 3's
+implementer discovered `@example.test` email addresses (used throughout the plan's own worked
+examples) are permanently rejected by `email-validator` -- `.test` is an RFC 2606 reserved TLD the
+library specifically refuses. Independently verified by the controller, then fixed at the source:
+the plan document itself was corrected to `@example.com` (commit `a369df8`) before later tasks could
+copy the mistake forward.
+
+**Two real, honest gaps, not fixed by this milestone -- documented, not glossed over:**
+- **A timing side-channel in `login()`.** `if user is None or not verify_password(...)` short-
+  circuits on `user is None`, so an unknown-email login never pays argon2's verification cost that a
+  known-email-wrong-password login does. The response message is identical either way, but the
+  code path to produce it is not -- a real, measurable timing difference between "no such account"
+  and "wrong password," independent of the response body. Flagged during Task 3's review as
+  plan-mandated for final whole-branch triage; still open.
+- **A test-isolation bug in `tests/test_auth.py::test_expired_session_returns_401`.** It inserts a
+  `sessions` row with a hardcoded token (`"expired-token-fixture"`) directly via `SessionLocal` and
+  never deletes it, so a second consecutive full-suite run against the same persistent test database
+  fails on the row's `token_hash` uniqueness constraint. Introduced in Task 2, flagged during Task
+  3's review, tracked for final review triage -- still open, and is the one known pre-existing
+  failure in the 171-passed/2-skipped/1-failed figure above.
+
+Real, tracked non-goals for this milestone (decided during brainstorming, not silently dropped --
+see `docs/adr/0002-authentication-model.md` for the reasoning behind each): no OAuth or social
+login, no teams/multi-user tenants/invites/roles, no email verification, no self-serve password
+reset (no transactional email sender exists in this project), no migration path for existing
+dev-stub data (synthetic dev/test data with no real user behind it -- a clean slate is acceptable),
+no admin role folded into user accounts (`X-Admin-Key` and `require_admin_key()` remain untouched,
+a separate operator-only mechanism).
 
 ## Done — M7c complete (closes M7, the whole project's final milestone)
 
@@ -1222,13 +1315,16 @@ findings, all fixed:
 
 ## In flight
 
-- Nothing mid-work right now. M0, M1, M2, M3, M4a, M4b, M5, M6a, M6b, and M6c are all done — the
-  full M6 milestone (all three sub-milestones) is complete. M4a's measured aligned-English accuracy
-  (68.2ms median, 37.2% within 50ms) does not meet `docs/PLAN.md`'s ±50ms acceptance criterion —
-  see M4a's entry below. That decision has been made, not left pending: merge M4a as
-  engineering-complete with the gap documented, tracked as real follow-up work (`docs/PLAN.md`
-  open question 5, commit `d3ff5ff`), not a merge blocker. Real authentication remains a genuine,
-  tracked gap across the whole project — `docs/PLAN.md` open question 9. M6a closed the read-path
+- Nothing mid-work right now. M0, M1, M2, M3, M4a, M4b, M5, M6a, M6b, M6c, M7 (M7a/M7b/M7c), and M8
+  are all done. M4a's measured aligned-English accuracy (68.2ms median, 37.2% within 50ms) does not
+  meet `docs/PLAN.md`'s ±50ms acceptance criterion — see M4a's entry below. That decision has been
+  made, not left pending: merge M4a as engineering-complete with the gap documented, tracked as real
+  follow-up work (`docs/PLAN.md` open question 5, commit `d3ff5ff`), not a merge blocker. Real
+  authentication is no longer an open gap — M8 closed `docs/PLAN.md` open question 9, replacing the
+  dev-header stub with real email+password auth (see M8's entry above and
+  `docs/adr/0002-authentication-model.md`); two narrower gaps M8 itself surfaced (the `login()`
+  timing side-channel and the `test_expired_session_returns_401` isolation bug) remain open, tracked
+  in that same entry, not silently closed alongside the milestone. M6a closed the read-path
   sub-question of `docs/PLAN.md` open question 10 (the `GET /tracks/{id}/package` read endpoint,
   `karaoke.json` v1 assembly, and schema validation now exist). M6c built the
   live-mic-pitch-scoring mechanism (calibration, cents-based scoring against M6a's contour) but
@@ -1268,6 +1364,4 @@ findings, all fixed:
    check whether the separated vocal stem's audio quality degrades alignment precision versus the
    original mix, or investigate a systematic bias in the frame-to-millisecond conversion. Real work,
    not a merge blocker.
-3. Configure a GitHub remote so `.github/workflows/ci.yml` actually runs (see "Blocked" above), and
-   revisit `docs/PLAN.md` open question 9 (real authentication) whenever a milestone's scope can
-   actually absorb it.
+3. Configure a GitHub remote so `.github/workflows/ci.yml` actually runs (see "Blocked" above).
