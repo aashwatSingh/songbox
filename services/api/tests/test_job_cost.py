@@ -115,8 +115,12 @@ def test_track_job_cost_computes_a_real_cost_when_backend_is_modal(
 
     job_records = [r for r in caplog.records if r.name == "songbox.job_cost"]
     assert len(job_records) == 1
+    # Not `> 0`: an empty wrapped block can measure a zero duration on a coarse clock (e.g.
+    # Windows' time.monotonic(), ~15.6ms resolution) even though real jobs never do. `is not None`
+    # is the real assertion -- it's what distinguishes "backend is modal, pricing was consulted"
+    # from the local-backend path, without depending on the wrapped block taking measurable time.
     assert job_records[0].estimated_cost_usd is not None  # type: ignore[attr-defined]
-    assert job_records[0].estimated_cost_usd > 0  # type: ignore[attr-defined]
+    assert job_records[0].estimated_cost_usd >= 0  # type: ignore[attr-defined]
 
 
 def test_track_job_cost_still_logs_when_the_wrapped_block_raises(

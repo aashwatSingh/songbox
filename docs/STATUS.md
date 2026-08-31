@@ -77,9 +77,13 @@ What was built:
   the numbers).
 - **Real cost data**, closing `docs/PLAN.md` open question 4 partially: Modal `A10` pricing
   recorded in `config/gpu_costs.yaml` for the first time (was an empty `TODO: unmeasured` stub
-  since M0) — M7b's `job_cost.py` now emits real `estimated_cost_usd` values instead of `null`,
-  with zero code changes needed there. What's still open: a real cost figure for an actual
-  multi-minute song (this milestone only measured a 3-second synthetic test tone).
+  since M0) — `job_cost.py`'s `track_job_cost()` now emits a real `estimated_cost_usd` for jobs
+  that actually ran on the `modal` backend. This did need a code change: populating the pricing
+  table for the first time surfaced a real gap where `local`-backend jobs (still the default) were
+  being priced at Modal's rate too, since M7b's original `job_cost.py` had no backend-awareness at
+  all — fixed by gating the pricing lookup on `GPU_BACKEND == "modal"`. The `local` backend still
+  correctly emits `null`. What's still open: a real cost figure for an actual multi-minute song
+  (this milestone only measured a 3-second synthetic test tone).
 - **The container-isolation properties this project doesn't configure itself, stated honestly
   rather than left silent (corrected after confirmation review found the original claim
   overstated):** Modal's real, documented runtime is gVisor-based (Google's application-kernel
