@@ -34,9 +34,13 @@ used for the admin-key comparison in this same file), set it as an httpOnly `son
 and persist only `sha256(raw_token)` in a new `sessions` table — a database read alone can never
 reproduce a valid cookie. `get_identity()` (`app/auth.py`) hashes the incoming cookie, looks up
 `sessions` joined to `users`, and checks `expires_at`. This was chosen over a signed JWT specifically
-for **server-side revocability without a blocklist**: logout (`POST /auth/logout`) is a single `DELETE`
-of the session row, and revoking a session takes effect on the very next request, no different from
-how it worked before. A JWT is validated by its signature alone, so revoking one before its natural
+for **server-side revocability without a blocklist**: logout (`POST /auth/logout`) looks up the
+session by its cookie's hashed token and deletes that row (`revoke_session()`, `app/auth.py`) before
+clearing the cookie, so revoking a session takes effect on the very next request, no different from
+how it worked before. (An earlier version of this route only cleared the cookie and never deleted
+the row -- a real gap caught in final whole-branch review, since it meant a leaked cookie stayed
+valid for the full 30 days with no way to revoke it, undermining the entire justification for this
+section. Fixed before merge; the code now matches this description.) A JWT is validated by its signature alone, so revoking one before its natural
 expiry requires either short-lived tokens with a refresh dance or maintaining a separate blocklist of
 revoked-but-unexpired tokens — real infrastructure this project doesn't need, since it isn't
 distributing verification across multiple independently-trusted services (the single reason JWTs earn
@@ -93,24 +97,48 @@ These were decided during brainstorming, not silently dropped:
   (`sessions` joined to `users`) that the header-trust stub never needed. This has not been
   benchmarked against real production load — no claim is made about its latency impact beyond "it
   exists."
-- Logout is now a real, effective control — deleting the `sessions` row genuinely revokes access on
-  the next request, which the old header stub had no equivalent of (there was nothing to revoke; a
-  client could always just resend the headers).
-- Two known, real gaps ship with this milestone, deliberately documented rather than silently
+- Logout is now a real, effective control — `revoke_session()` deleting the `sessions` row
+  genuinely revokes access on the next request, which the old header stub had no equivalent of
+  (there was nothing to revoke; a client could always just resend the headers).
+- One known, real gap still ships with this milestone, deliberately documented rather than silently
   fixed or hidden (see `docs/STATUS.md`'s M8 entry and `docs/DECISIONS_LOG.md` for the incident that
-  found each):
+  found it):
   - `login()`'s unknown-email branch and its wrong-password branch are not timing-equivalent.
     `if user is None or not verify_password(...)` short-circuits on `user is None`, so an unknown
     email never pays argon2's verification cost that a known email with a wrong password does. The
     response body is identical either way (`_GENERIC_LOGIN_FAILURE`, generic `401`), but the timing
     channel itself is not closed. Flagged during Task 3's review as plan-mandated for final
-    whole-branch triage; not fixed in this milestone.
-  - `tests/test_auth.py::test_expired_session_returns_401` inserts a `sessions` row with a
-    hardcoded token (`"expired-token-fixture"`) directly via `SessionLocal` and never deletes it,
-    so a second consecutive full-suite run against the same persistent test database fails on the
-    row's `token_hash` uniqueness constraint. This is a test-isolation bug, not a bug in the auth
-    code itself, and was flagged during Task 3's review as a pre-existing issue (introduced in
-    Task 2) for final review triage. Not fixed in this milestone.
+    whole-branch triage; not fixed in this milestone. **Related, and worth naming for consistency:**
+    `POST /auth/signup`'s `409 "an account with this email already exists"` response is an equally
+    real (arguably more reliable, since it needs no timing measurement at all) email-enumeration
+    oracle — a caller can determine whether an email is registered just from the status code. This
+    is a defensible, near-universal UX trade-off (most products with a signup form behave this way),
+    but the docs should be consistent about naming it rather than only naming the subtler
+    login-timing channel. Not fixed in this milestone, same as the timing channel.
+  - `tests/test_auth.py::test_expired_session_returns_401`'s test-isolation bug (a hardcoded
+    `"expired-token-fixture"` token colliding with `token_hash`'s UNIQUE constraint on a second
+    consecutive full-suite run) — flagged in this section in an earlier draft — **was fixed** during
+    final whole-branch review by generating a fresh unique token per run
+    (`f"expired-token-{uuid.uuid4()}"`), matching the pattern `tests/test_users_sessions_schema.py`
+    already used for the identical reason. No longer an open gap.
+- **`SameSite=Lax` and cross-site production deployment.** The cookie's `SameSite=Lax` setting is
+  correct for a same-site deployment — the API and the web app sharing one registrable domain, as in
+  local dev (`http://localhost:3000` calling `http://localhost:8000` or similar). If a future
+  production deployment ever puts the web app and the API on genuinely different registrable
+  domains (e.g. `app.example.com` calling `api.example-backend.com`), `SameSite=Lax` will silently
+  block the cookie on cross-origin `fetch()` calls, and every authenticated request will 401. The
+  fix at that point is either same-site hosting (a shared registrable domain, even via subdomains
+  and a `Domain=` cookie attribute) or switching to `SameSite=None; Secure`. Not a problem today;
+  worth knowing before the day a production deploy topology changes this.
+- **`is_production()`'s undocumented env var and fail-open default.** `SONGBOX_ENV` (checked by
+  `is_production()` in `app/auth.py`, gating whether the session cookie gets `Secure`) currently
+  appears only in `app/auth.py` and this ADR — not in any `.env.example`, `docker-compose.yml`, or
+  deployment doc. Its default (`"development"` when unset) is fail-open: an operator who deploys to
+  production without explicitly setting `SONGBOX_ENV=production` silently ships session cookies
+  without `Secure`, allowing them to be sent over plain HTTP. This is a real, tracked gap, flagged
+  during final whole-branch review — not fixed here. Changing the default to fail-closed is a
+  behavior change with its own risk/testing burden and is out of scope for this documentation pass;
+  the honest fix for now is documenting the requirement, which this paragraph is that documentation.
 - No email verification or password reset means a typo'd signup email or a forgotten password both
   currently have no in-product recovery path — the user is stuck creating a new account. Acceptable
   for this milestone's scope, but a real limitation a future milestone would need to address before

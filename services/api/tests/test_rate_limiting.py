@@ -182,3 +182,46 @@ def test_takedown_rate_limit_is_scoped_to_the_endpoint_not_the_literal_path(
 
     assert [r.status_code for r in responses[:10]] == [401] * 10
     assert responses[10].status_code == 429
+
+
+def test_signup_is_rate_limited_to_10_per_minute_and_429_carries_retry_after() -> None:
+    # Final-review finding #2: signup is the highest-value brute-force/DoS target in the whole
+    # system (unauthenticated, and every request pays argon2's memory-hard hashing cost) and was
+    # the only mutating route with no @limiter.limit(...) at all. 11 rapid signups from one
+    # simulated peer IP, each a genuinely distinct account so the first 10 succeed on their own
+    # merits rather than being masked by a 409 -- the 11th must 429 regardless.
+    client = TestClient(app, client=(_random_test_ip(), 1))
+
+    responses = [
+        client.post(
+            "/auth/signup",
+            json={"email": f"{uuid.uuid4()}@example.com", "password": "hunter22ab"},
+        )
+        for _ in range(11)
+    ]
+
+    assert [r.status_code for r in responses[:10]] == [200] * 10
+    assert responses[10].status_code == 429
+    assert "retry-after" in responses[10].headers
+
+
+def test_login_is_rate_limited_to_10_per_minute_and_429_carries_retry_after() -> None:
+    # Same finding as above, for /auth/login -- repeatedly hitting one real account (wrong
+    # password each time) must still 429 on the 11th attempt, independent of whether any
+    # individual attempt succeeds or fails.
+    signup_client = TestClient(app, client=(_random_test_ip(), 1))
+    email = f"{uuid.uuid4()}@example.com"
+    signup_response = signup_client.post(
+        "/auth/signup", json={"email": email, "password": "hunter22ab"}
+    )
+    assert signup_response.status_code == 200
+
+    login_client = TestClient(app, client=(_random_test_ip(), 1))
+    responses = [
+        login_client.post("/auth/login", json={"email": email, "password": "wrong-password"})
+        for _ in range(11)
+    ]
+
+    assert [r.status_code for r in responses[:10]] == [401] * 10
+    assert responses[10].status_code == 429
+    assert "retry-after" in responses[10].headers

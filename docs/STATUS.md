@@ -53,18 +53,20 @@ What was built:
   surfaces a real visible generic error; the session cookie was confirmed httpOnly
   (`document.cookie` empty) and `localStorage` was confirmed clean of the old dev-identity keys. No
   real application bugs were found during this pass.
-- **Test suite migrated off dev headers.** 18 existing test files that set
+- **Test suite migrated off dev headers.** 15 existing test files that set
   `X-Dev-Tenant-Id`/`X-Dev-User-Id` headers directly against a `TestClient` were migrated to a new
-  `authed_client` fixture (`services/api/tests/conftest.py`) that signs up and logs in a real user,
-  returning a `TestClient` whose cookie jar already carries the session -- real, non-trivial
+  `authed_client` fixture (`services/api/tests/conftest.py`) that signs up a real user via
+  `sign_up()` (login is unnecessary -- signup already returns an active session), returning a
+  `TestClient` whose cookie jar already carries the session -- real, non-trivial
   migration work across the suite, not hand-waved. New tests specific to this milestone
   (`services/api/tests/test_auth_routes.py`, `test_users_sessions_schema.py`, additions to
   `test_auth.py`) cover signup/login/logout/me happy paths, wrong password, duplicate email, expired
   session cookie, tampered/garbage session cookie, and a real end-to-end RLS check that two
   independently signed-up users cannot see each other's tracks through the real auth path (not just
   through the old dev-header mechanism the existing RLS tests already covered).
-- **Full local suite: 171 passed, 2 skipped** (the gated `SONGBOX_MODAL_LIVE_TESTS` Modal tests from
-  M7c, unrelated to auth), **1 known pre-existing failure**, documented below rather than hidden.
+- **Full local suite (post final-review fix round): see this round's actual pytest output** in
+  `.superpowers/sdd/final-review-fix-report.md` for the exact passed/skipped counts, run twice
+  consecutively to prove the test-isolation bug below is genuinely fixed, not just documented.
 
 **A real finding, caught mid-implementation and fixed before it could repeat:** Task 3's
 implementer discovered `@example.test` email addresses (used throughout the plan's own worked
@@ -73,19 +75,43 @@ library specifically refuses. Independently verified by the controller, then fix
 the plan document itself was corrected to `@example.com` (commit `a369df8`) before later tasks could
 copy the mistake forward.
 
-**Two real, honest gaps, not fixed by this milestone -- documented, not glossed over:**
+**Final whole-branch review fix round (2026-08-31):** a review across all ten M8 tasks together
+found real issues no single per-task diff could see. Fixed before merge:
+- **`logout()` didn't actually revoke the session.** It only cleared the cookie; the `sessions` row
+  stayed valid until its natural 30-day expiry, contradicting this doc's and the ADR's own claimed
+  justification for DB-backed cookies over JWTs (server-side revocability). Fixed: `logout()` now
+  looks up the session by its cookie's hashed token and deletes that row (`revoke_session()`,
+  `app/auth.py`) before clearing the cookie. See `docs/adr/0002-authentication-model.md` and
+  `docs/DECISIONS_LOG.md`, both corrected to match.
+- **No rate limiting on `POST /auth/login` or `POST /auth/signup`** -- the only two mutating,
+  unauthenticated, credential-bearing routes in the codebase with no `@limiter.limit(...)`, despite
+  being the highest-value brute-force/DoS targets (argon2's memory-hard hashing amplifies the cost
+  of even a modest burst). Fixed: both now carry `@limiter.limit("10/minute")`.
+- **No maximum password length.** `SignupRequest`/`LoginRequest`'s `password` fields had no upper
+  bound, letting a multi-megabyte string reach argon2 hashing/verification directly -- a DoS
+  amplifier stacked on top of the missing rate limit above. Fixed with `max_length=1024`.
+- **Coverage gaps closed with new tests:** server-side session revocation on logout (not just the
+  client's cookie jar clearing), the new login/signup rate limits actually firing, the session
+  cookie's `HttpOnly`/`SameSite=Lax`/`Path=/`/environment-gated `Secure` attributes, `songbox_app`'s
+  actual lack of a Postgres `GRANT` on `users`/`sessions` (the earlier test only proved they lack an
+  RLS policy, which is not the same claim), and `citext`'s case-insensitive email collision behavior
+  at both signup and login.
+- **The `test_expired_session_returns_401` test-isolation bug (below) is fixed**, not just
+  documented -- see this round's own report for the two-consecutive-runs proof.
+- Frontend: the `/tracks` logout button now awaits `logout()` and calls `AuthContext`'s `refresh()`
+  before navigating (previously left stale client-side auth state and an unhandled promise
+  rejection on failure), and the tracks-fetching effect is now gated on `user !== null` so an
+  unauthenticated visit no longer fires a guaranteed-401 API call before the redirect to `/login`.
+
+**One real, honest gap remains, not fixed by this milestone -- documented, not glossed over:**
 - **A timing side-channel in `login()`.** `if user is None or not verify_password(...)` short-
   circuits on `user is None`, so an unknown-email login never pays argon2's verification cost that a
   known-email-wrong-password login does. The response message is identical either way, but the
   code path to produce it is not -- a real, measurable timing difference between "no such account"
   and "wrong password," independent of the response body. Flagged during Task 3's review as
-  plan-mandated for final whole-branch triage; still open.
-- **A test-isolation bug in `tests/test_auth.py::test_expired_session_returns_401`.** It inserts a
-  `sessions` row with a hardcoded token (`"expired-token-fixture"`) directly via `SessionLocal` and
-  never deletes it, so a second consecutive full-suite run against the same persistent test database
-  fails on the row's `token_hash` uniqueness constraint. Introduced in Task 2, flagged during Task
-  3's review, tracked for final review triage -- still open, and is the one known pre-existing
-  failure in the 171-passed/2-skipped/1-failed figure above.
+  plan-mandated for final whole-branch triage; still open. Related and now named explicitly in the
+  ADR for consistency: `POST /auth/signup`'s `409` duplicate-email response is an equally real
+  email-enumeration oracle, accepted as a defensible UX trade-off.
 
 Real, tracked non-goals for this milestone (decided during brainstorming, not silently dropped --
 see `docs/adr/0002-authentication-model.md` for the reasoning behind each): no OAuth or social
@@ -94,6 +120,15 @@ reset (no transactional email sender exists in this project), no migration path 
 dev-stub data (synthetic dev/test data with no real user behind it -- a clean slate is acceptable),
 no admin role folded into user accounts (`X-Admin-Key` and `require_admin_key()` remain untouched,
 a separate operator-only mechanism).
+
+**A real, tracked follow-up, not implemented in this milestone:** `sessions` rows are never deleted
+after their `expires_at` passes -- there is no purge/retention sweep for expired sessions, unlike
+`tracks` (see `services/api/scripts/purge_expired_tracks.py` and
+`tests/test_purge_expired_tracks.py` for M7a's existing retention-purge pattern for a different
+table). This project's existing M7a retention/purge machinery would be the natural place to add an
+expired-session sweep. Not a security gap on its own (an expired session already fails
+`get_identity()`'s `expires_at` check on every request, regardless of whether the row still exists),
+but an unbounded-growth and data-hygiene gap worth tracking.
 
 ## Done — M7c complete (closes M7, the whole project's final milestone)
 

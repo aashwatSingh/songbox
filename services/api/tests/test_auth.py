@@ -34,7 +34,7 @@ def _make_user() -> User:
         user = User(
             id=uuid.uuid4(),
             tenant_id=uuid.uuid4(),
-            email=f"{uuid.uuid4()}@example.test",
+            email=f"{uuid.uuid4()}@example.com",
             password_hash=hash_password("correct horse battery staple"),
             created_at=datetime.now(UTC),
         )
@@ -86,7 +86,11 @@ def test_expired_session_returns_401() -> None:
     user = _make_user()
     session = SessionLocal()
     try:
-        raw_token = "expired-token-fixture"
+        # Fresh unique token per run, not a hardcoded literal -- token_hash has a UNIQUE
+        # constraint, so a hardcoded value collides on a second consecutive full-suite run
+        # against the same persistent test database. Same fix already applied one file over in
+        # test_users_sessions_schema.py for the identical reason.
+        raw_token = f"expired-token-{uuid.uuid4()}"
         import hashlib
 
         session.add(

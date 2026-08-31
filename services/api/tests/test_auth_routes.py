@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.auth import SESSION_COOKIE_NAME
@@ -122,4 +123,82 @@ def test_logout_clears_the_session_so_me_then_401s() -> None:
 
 def test_logout_without_a_session_is_a_no_op_200() -> None:
     response = TestClient(app).post("/auth/logout")
+    assert response.status_code == 200
+
+
+def test_logout_actually_revokes_the_session_on_the_server() -> None:
+    # Final-review finding #1: the existing test_logout_clears_the_session_so_me_then_401s test
+    # only proves the CLIENT's cookie jar was cleared client-side -- it never proves the server
+    # itself rejects the OLD raw token afterward. This test manually sets the old raw token as a
+    # cookie on a FRESH TestClient (bypassing the logged-out client's cleared cookie jar) and
+    # confirms the server rejects it, proving logout() actually deletes the sessions row rather
+    # than just clearing the cookie.
+    email = _unique_email()
+    session_client = TestClient(app)
+    signup_response = session_client.post(
+        "/auth/signup", json={"email": email, "password": "hunter22ab"}
+    )
+    old_raw_token = signup_response.cookies[SESSION_COOKIE_NAME]
+
+    logout_response = session_client.post("/auth/logout")
+    assert logout_response.status_code == 200
+
+    fresh_client = TestClient(app)
+    fresh_client.cookies.set(SESSION_COOKIE_NAME, old_raw_token)
+    response = fresh_client.get("/auth/me")
+
+    assert response.status_code == 401
+
+
+def test_signup_sets_httponly_samesite_lax_and_path_cookie_attributes() -> None:
+    email = _unique_email()
+    response = client.post("/auth/signup", json={"email": email, "password": "hunter22ab"})
+
+    set_cookie = response.headers.get("set-cookie", "")
+    assert "HttpOnly" in set_cookie
+    # Case-insensitive: Starlette's Response.set_cookie() echoes samesite="lax" verbatim as
+    # lowercase "SameSite=lax" in the actual header -- the HTTP attribute value itself is
+    # case-insensitive per RFC 6265bis, so this checks the real header content, not a specific
+    # casing convention app/routes/auth.py never claimed to follow.
+    assert "samesite=lax" in set_cookie.lower()
+    assert "Path=/" in set_cookie
+
+
+def test_signup_cookie_is_secure_in_production_but_not_in_development(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SONGBOX_ENV", "production")
+    prod_response = client.post(
+        "/auth/signup", json={"email": _unique_email(), "password": "hunter22ab"}
+    )
+    assert "Secure" in prod_response.headers.get("set-cookie", "")
+
+    monkeypatch.delenv("SONGBOX_ENV", raising=False)
+    dev_response = client.post(
+        "/auth/signup", json={"email": _unique_email(), "password": "hunter22ab"}
+    )
+    assert "Secure" not in dev_response.headers.get("set-cookie", "")
+
+
+def test_signup_then_signup_again_with_different_casing_of_same_email_returns_409() -> None:
+    # The 0009 migration installs Postgres's citext extension specifically so that two different
+    # casings of the same email collide as the same account -- nothing previously tested this.
+    email = _unique_email()
+    first = client.post("/auth/signup", json={"email": email, "password": "hunter22ab"})
+    assert first.status_code == 200
+
+    second = client.post(
+        "/auth/signup", json={"email": email.upper(), "password": "different-password"}
+    )
+    assert second.status_code == 409
+
+
+def test_login_works_with_different_casing_than_the_email_used_at_signup() -> None:
+    email = _unique_email()
+    client.post("/auth/signup", json={"email": email, "password": "hunter22ab"})
+
+    response = client.post(
+        "/auth/login", json={"email": email.upper(), "password": "hunter22ab"}
+    )
+
     assert response.status_code == 200

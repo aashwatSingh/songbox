@@ -49,6 +49,10 @@ def create_session(user: User) -> str:
     not AppSessionLocal -- sessions has no RLS policy and songbox_app has no grant on it (see
     alembic/versions/0009_add_users_and_sessions.py).
     """
+    # Local import, not module-level: app/db.py imports Identity/get_identity from this module
+    # (app/auth.py) at module level, so a module-level `from app.db import SessionLocal` here would
+    # be a real circular import. Deferring the import to call time breaks the cycle. Don't "fix"
+    # this back to a top-level import.
     from app.db import SessionLocal
 
     raw_token = secrets.token_urlsafe(32)
@@ -70,6 +74,29 @@ def create_session(user: User) -> str:
     return raw_token
 
 
+def revoke_session(raw_token: str) -> None:
+    """Deletes the `sessions` row matching `raw_token`'s hash, if any -- the server-side half of
+    logout (`POST /auth/logout` in `app/routes/auth.py`). Mirrors create_session()'s resource
+    pattern: its own short-lived SessionLocal(), always closed in a finally. A no-op (not an error)
+    when no row matches -- an already-expired/garbage/never-existed token, or logging out twice in
+    a row, must never fail here.
+    """
+    # Local import: same circular-import reason as create_session()'s -- see its comment above.
+    from app.db import SessionLocal
+
+    token_hash = _hash_token(raw_token)
+    db = SessionLocal()
+    try:
+        session_row = db.execute(
+            select(UserSession).where(UserSession.token_hash == token_hash)
+        ).scalar_one_or_none()
+        if session_row is not None:
+            db.delete(session_row)
+            db.commit()
+    finally:
+        db.close()
+
+
 def is_production() -> bool:
     return os.environ.get("SONGBOX_ENV", "development") == "production"
 
@@ -78,6 +105,8 @@ def get_identity(
     request: Request,
     songbox_session: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
 ) -> Identity:
+    # Local import, not module-level: same circular-import reason as create_session()'s comment
+    # above (app/db.py imports from this module at module level).
     from app.db import SessionLocal
 
     if not songbox_session:

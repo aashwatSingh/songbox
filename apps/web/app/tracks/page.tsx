@@ -8,7 +8,7 @@ import { useAuth } from "@/lib/AuthContext";
 
 export default function TracksPage() {
   const router = useRouter();
-  const { user, loading: authLoading } = useAuth();
+  const { user, loading: authLoading, refresh } = useAuth();
   const [tracks, setTracks] = useState<TrackSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -19,10 +19,28 @@ export default function TracksPage() {
   }, [authLoading, user, router]);
 
   useEffect(() => {
+    // Gated on `user` so this doesn't fire on every unauthenticated visit before the redirect
+    // above has a chance to run -- without this, an unauthenticated visit to /tracks fired a
+    // doomed, guaranteed-401 API call before redirecting to /login.
+    if (user === null) {
+      return;
+    }
     listTracks()
       .then(setTracks)
       .catch((err: Error) => setError(err.message));
-  }, []);
+  }, [user]);
+
+  const handleLogout = async () => {
+    try {
+      await logout();
+    } catch {
+      // A failed logout call shouldn't trap the user on the page -- fall through to navigate
+      // away regardless.
+    } finally {
+      await refresh();
+      router.push("/login");
+    }
+  };
 
   if (authLoading || user === null) {
     return (
@@ -50,10 +68,7 @@ export default function TracksPage() {
     <main className="max-w-2xl mx-auto py-12 px-6">
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-semibold">Tracks</h1>
-        <button
-          onClick={() => logout().then(() => router.push("/login"))}
-          className="text-sm text-zinc-500 underline"
-        >
+        <button onClick={() => void handleLogout()} className="text-sm text-zinc-500 underline">
           Log out
         </button>
       </div>

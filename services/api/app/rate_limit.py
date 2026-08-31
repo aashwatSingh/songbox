@@ -5,11 +5,14 @@ import os
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
-# Per-IP, not per-tenant: X-Dev-Tenant-Id is a spoofable dev-only header (docs/PLAN.md open
-# question 9), so keying on it would protect nothing against a deliberate abuser -- IP is the
-# real, if coarse, backstop today. REDIS_URL defaults to the docker-compose Redis instance, which
-# nothing else in this codebase uses yet. headers_enabled=True so a 429 carries a real
-# Retry-After header -- this is NOT slowapi's default.
+# Per-IP, not per-tenant/per-identity: real authentication landed in M8 (docs/PLAN.md open
+# question 9, now resolved -- see docs/adr/0002-authentication-model.md), but per-IP limiting
+# remains the right choice for unauthenticated, credential-bearing endpoints like
+# POST /auth/login and POST /auth/signup regardless -- an anonymous attacker hasn't signed in yet,
+# so there is no real identity to key on or spoof in the first place; IP is the real, if coarse,
+# backstop for exactly this class of route. REDIS_URL defaults to the docker-compose Redis
+# instance, which nothing else in this codebase uses yet. headers_enabled=True so a 429 carries a
+# real Retry-After header -- this is NOT slowapi's default.
 #
 # Deployment note for whenever this runs behind a real reverse proxy/load balancer (not yet --
 # see M7c): uvicorn's default proxy_headers=True with forwarded_allow_ips defaulting to

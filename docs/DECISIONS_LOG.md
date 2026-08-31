@@ -62,8 +62,12 @@ M8's real-authentication design (`docs/superpowers/specs/2026-08-31-real-authent
 needed a session mechanism to replace the dev-only header stub. Chose DB-backed opaque httpOnly
 cookies (`services/api/app/auth.py`: a random `secrets.token_urlsafe(32)` token, only its `sha256`
 hash ever persisted in a new `sessions` table) over a signed JWT, specifically for server-side
-revocability without a blocklist: logout is a single `DELETE` of the session row and takes effect on
-the very next request. A JWT would need either short-lived tokens with a refresh dance or a separate
+revocability without a blocklist: logout looks up the session by its cookie's hashed token and
+deletes that row (`revoke_session()`, `app/auth.py`), taking effect on the very next request. (An
+earlier version of `logout()` only cleared the cookie and never deleted the row — caught and fixed
+during final whole-branch review, since it left this whole justification false in practice; a leaked
+cookie would have stayed valid for the full 30 days with no way to revoke it.) A JWT would need
+either short-lived tokens with a refresh dance or a separate
 blocklist of revoked-but-unexpired tokens to get the same property — real infrastructure this
 project doesn't need, since nothing here distributes verification across multiple independently-
 trusted services (the actual reason JWTs earn their complexity). The accepted cost is one extra
