@@ -10,11 +10,7 @@ from fastapi.testclient import TestClient
 from app.acoustid.client import FixtureAcoustIDClient
 from app.main import app
 from app.routes.tracks import get_acoustid_client
-
-HEADERS = {
-    "X-Dev-Tenant-Id": str(uuid.uuid4()),
-    "X-Dev-User-Id": str(uuid.uuid4()),
-}
+from tests.conftest import sign_up
 
 
 def _random_test_ip() -> str:
@@ -33,11 +29,10 @@ def test_separate_is_rate_limited_to_20_per_hour_and_429_carries_retry_after() -
     # decorator still counts every attempt regardless of what the route body does, so this
     # exercises the real /separate route's real limit without running real GPU inference.
     client = TestClient(app, client=(_random_test_ip(), 1))
+    sign_up(client)
     fake_track_id = uuid.uuid4()
 
-    responses = [
-        client.post(f"/tracks/{fake_track_id}/separate", headers=HEADERS) for _ in range(21)
-    ]
+    responses = [client.post(f"/tracks/{fake_track_id}/separate") for _ in range(21)]
 
     assert [r.status_code for r in responses[:20]] == [404] * 20
     assert responses[20].status_code == 429
@@ -46,11 +41,10 @@ def test_separate_is_rate_limited_to_20_per_hour_and_429_carries_retry_after() -
 
 def test_transcribe_is_rate_limited_to_20_per_hour() -> None:
     client = TestClient(app, client=(_random_test_ip(), 1))
+    sign_up(client)
     fake_track_id = uuid.uuid4()
 
-    responses = [
-        client.post(f"/tracks/{fake_track_id}/transcribe", headers=HEADERS) for _ in range(21)
-    ]
+    responses = [client.post(f"/tracks/{fake_track_id}/transcribe") for _ in range(21)]
 
     assert [r.status_code for r in responses[:20]] == [404] * 20
     assert responses[20].status_code == 429
@@ -58,12 +52,11 @@ def test_transcribe_is_rate_limited_to_20_per_hour() -> None:
 
 def test_realign_is_rate_limited_to_20_per_hour() -> None:
     client = TestClient(app, client=(_random_test_ip(), 1))
+    sign_up(client)
     fake_track_id = uuid.uuid4()
 
     responses = [
-        client.post(
-            f"/tracks/{fake_track_id}/realign", headers=HEADERS, json={"text": "whatever"}
-        )
+        client.post(f"/tracks/{fake_track_id}/realign", json={"text": "whatever"})
         for _ in range(21)
     ]
 
@@ -73,11 +66,10 @@ def test_realign_is_rate_limited_to_20_per_hour() -> None:
 
 def test_package_is_rate_limited_to_20_per_hour() -> None:
     client = TestClient(app, client=(_random_test_ip(), 1))
+    sign_up(client)
     fake_track_id = uuid.uuid4()
 
-    responses = [
-        client.post(f"/tracks/{fake_track_id}/package", headers=HEADERS) for _ in range(21)
-    ]
+    responses = [client.post(f"/tracks/{fake_track_id}/package") for _ in range(21)]
 
     assert [r.status_code for r in responses[:20]] == [404] * 20
     assert responses[20].status_code == 429
@@ -114,6 +106,8 @@ def test_upload_rate_limit_boundary_and_per_ip_isolation(synthetic_wav: Path) ->
     ip_b = _random_test_ip()
     client_a = TestClient(app, client=(ip_a, 1))
     client_b = TestClient(app, client=(ip_b, 1))
+    sign_up(client_a)
+    sign_up(client_b)
 
     app.dependency_overrides[get_acoustid_client] = lambda: FixtureAcoustIDClient({})
     try:
@@ -121,7 +115,6 @@ def test_upload_rate_limit_boundary_and_per_ip_isolation(synthetic_wav: Path) ->
             with synthetic_wav.open("rb") as fh:
                 response = client_a.post(
                     "/tracks/upload",
-                    headers=HEADERS,
                     data={"lane": "A", "attestation_text": "I made this recording"},
                     files={"file": ("tone.wav", fh, "audio/wav")},
                 )
@@ -130,7 +123,6 @@ def test_upload_rate_limit_boundary_and_per_ip_isolation(synthetic_wav: Path) ->
         with synthetic_wav.open("rb") as fh:
             exhausted_response = client_a.post(
                 "/tracks/upload",
-                headers=HEADERS,
                 data={"lane": "A", "attestation_text": "I made this recording"},
                 files={"file": ("tone.wav", fh, "audio/wav")},
             )
@@ -141,7 +133,6 @@ def test_upload_rate_limit_boundary_and_per_ip_isolation(synthetic_wav: Path) ->
         with synthetic_wav.open("rb") as fh:
             b_response = client_b.post(
                 "/tracks/upload",
-                headers=HEADERS,
                 data={"lane": "A", "attestation_text": "I made this recording"},
                 files={"file": ("tone.wav", fh, "audio/wav")},
             )
@@ -152,8 +143,9 @@ def test_upload_rate_limit_boundary_and_per_ip_isolation(synthetic_wav: Path) ->
 
 def test_unlimited_route_never_rate_limits() -> None:
     client = TestClient(app, client=(_random_test_ip(), 1))
+    sign_up(client)
     for _ in range(50):
-        response = client.get("/tracks", headers=HEADERS)
+        response = client.get("/tracks")
         assert response.status_code == 200
 
 
@@ -165,10 +157,9 @@ def test_separate_rate_limit_is_scoped_to_the_endpoint_not_the_literal_path() ->
     # drives 21 requests with 21 DIFFERENT track_ids from the same IP and confirms the 21st
     # still 429s -- proving the limit is genuinely scoped per-endpoint, not per-path.
     client = TestClient(app, client=(_random_test_ip(), 1))
+    sign_up(client)
 
-    responses = [
-        client.post(f"/tracks/{uuid.uuid4()}/separate", headers=HEADERS) for _ in range(21)
-    ]
+    responses = [client.post(f"/tracks/{uuid.uuid4()}/separate") for _ in range(21)]
 
     assert [r.status_code for r in responses[:20]] == [404] * 20
     assert responses[20].status_code == 429
