@@ -1,12 +1,22 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { listTracks, type TrackSummary } from "@/lib/api";
+import { listTracks, logout, type TrackSummary } from "@/lib/api";
+import { useAuth } from "@/lib/AuthContext";
 
 export default function TracksPage() {
+  const router = useRouter();
+  const { user, loading: authLoading } = useAuth();
   const [tracks, setTracks] = useState<TrackSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!authLoading && user === null) {
+      router.push("/login");
+    }
+  }, [authLoading, user, router]);
 
   useEffect(() => {
     listTracks()
@@ -14,6 +24,13 @@ export default function TracksPage() {
       .catch((err: Error) => setError(err.message));
   }, []);
 
+  if (authLoading || user === null) {
+    return (
+      <main className="max-w-2xl mx-auto py-12 px-6">
+        <p>Loading...</p>
+      </main>
+    );
+  }
   if (error) {
     return (
       <main className="max-w-2xl mx-auto py-12 px-6">
@@ -31,7 +48,15 @@ export default function TracksPage() {
 
   return (
     <main className="max-w-2xl mx-auto py-12 px-6">
-      <h1 className="text-2xl font-semibold mb-6">Tracks</h1>
+      <div className="flex items-center justify-between mb-6">
+        <h1 className="text-2xl font-semibold">Tracks</h1>
+        <button
+          onClick={() => logout().then(() => router.push("/login"))}
+          className="text-sm text-zinc-500 underline"
+        >
+          Log out
+        </button>
+      </div>
       {tracks.length === 0 ? (
         <p className="text-zinc-500">No tracks yet.</p>
       ) : (

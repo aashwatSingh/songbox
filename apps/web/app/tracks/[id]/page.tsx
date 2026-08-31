@@ -1,8 +1,10 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { use, useEffect, useState } from "react";
 import { getTranscription, realignTrack, type TranscriptionResponse } from "@/lib/api";
+import { useAuth } from "@/lib/AuthContext";
 
 function BackToTracksLink() {
   return (
@@ -17,6 +19,14 @@ function BackToTracksLink() {
 
 export default function TrackEditorPage(props: PageProps<"/tracks/[id]">) {
   const { id } = use(props.params);
+  const router = useRouter();
+  const { user, loading: authLoading } = useAuth();
+
+  useEffect(() => {
+    if (!authLoading && user === null) {
+      router.push("/login");
+    }
+  }, [authLoading, user, router]);
   const [transcription, setTranscription] = useState<TranscriptionResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [wordTexts, setWordTexts] = useState<string[]>([]);
@@ -43,6 +53,14 @@ export default function TrackEditorPage(props: PageProps<"/tracks/[id]">) {
     } finally {
       setSaving(false);
     }
+  }
+
+  if (authLoading || user === null) {
+    return (
+      <main className="max-w-2xl mx-auto py-12 px-6">
+        <p>Loading...</p>
+      </main>
+    );
   }
 
   if (error && transcription === null) {
