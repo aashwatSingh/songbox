@@ -4,7 +4,6 @@ import Link from "next/link";
 import { use, useEffect, useMemo, useRef, useState } from "react";
 import {
   generatePackage,
-  getDevIdentityHeaders,
   getPackage,
   stemUrl,
   type PackageResponse,
@@ -35,10 +34,10 @@ function BackToTracksLink() {
 }
 
 async function decodeStem(context: AudioContext, path: string): Promise<AudioBuffer> {
-  // Same-origin relative to API_BASE_URL, but still gated by the dev-auth-stub identity check
-  // every other route requires -- apiFetch() attaches these headers automatically, but this is a
-  // raw fetch() (binary audio, not JSON), so they're attached explicitly here.
-  const response = await fetch(stemUrl(path), { headers: getDevIdentityHeaders() });
+  // Same-origin relative to API_BASE_URL. This is a raw fetch() (binary audio, not JSON), so it
+  // doesn't go through apiFetch() -- it needs its own credentials: "include" so the httpOnly
+  // session cookie travels with the request the same way apiFetch()'s calls do.
+  const response = await fetch(stemUrl(path), { credentials: "include" });
   if (!response.ok) {
     throw new Error(`could not fetch stem audio (${response.status})`);
   }

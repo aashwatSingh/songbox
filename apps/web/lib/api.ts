@@ -1,45 +1,11 @@
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
-const TENANT_ID_KEY = "songbox-dev-tenant-id";
-const USER_ID_KEY = "songbox-dev-user-id";
-
-// Dev-only identity: no real authentication exists in this project yet (see docs/PLAN.md's open
-// questions and docs/superpowers/specs/2026-08-23-lyric-correction-editor-design.md Decision 1).
-// This generates a random tenant/user pair on first load and reuses it from localStorage after
-// that, sent as the same X-Dev-Tenant-Id/X-Dev-User-Id headers every other client of this API
-// (curl, pytest) has always used. Never mistake this for real auth.
-function getDevIdentity(): { tenantId: string; userId: string } {
-  if (typeof window === "undefined") {
-    throw new Error("getDevIdentity() can only be called in the browser");
-  }
-  let tenantId = window.localStorage.getItem(TENANT_ID_KEY);
-  let userId = window.localStorage.getItem(USER_ID_KEY);
-  if (!tenantId || !userId) {
-    tenantId = crypto.randomUUID();
-    userId = crypto.randomUUID();
-    window.localStorage.setItem(TENANT_ID_KEY, tenantId);
-    window.localStorage.setItem(USER_ID_KEY, userId);
-  }
-  return { tenantId, userId };
-}
-
-// Exposes the same X-Dev-Tenant-Id/X-Dev-User-Id pair apiFetch() sends, for the rare caller (the
-// stem audio fetch in the player page) that must hit the API directly with the browser's fetch()
-// instead of going through apiFetch() -- the backend's dev-auth-stub identity gate requires these
-// headers on every route, including /stems/{stem_type}.
-export function getDevIdentityHeaders(): Record<string, string> {
-  const { tenantId, userId } = getDevIdentity();
-  return { "X-Dev-Tenant-Id": tenantId, "X-Dev-User-Id": userId };
-}
-
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const { tenantId, userId } = getDevIdentity();
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...init,
+    credentials: "include",
     headers: {
       ...(init?.headers ?? {}),
-      "X-Dev-Tenant-Id": tenantId,
-      "X-Dev-User-Id": userId,
       ...(init?.body ? { "Content-Type": "application/json" } : {}),
     },
   });
@@ -52,6 +18,41 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(detail);
   }
   return response.json() as Promise<T>;
+}
+
+export interface Identity {
+  tenant_id: string;
+  user_id: string;
+}
+
+export interface CurrentUser extends Identity {
+  email: string;
+}
+
+export function signup(email: string, password: string): Promise<Identity> {
+  return apiFetch<Identity>("/auth/signup", {
+    method: "POST",
+    body: JSON.stringify({ email, password }),
+  });
+}
+
+export function login(email: string, password: string): Promise<Identity> {
+  return apiFetch<Identity>("/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ email, password }),
+  });
+}
+
+export async function logout(): Promise<void> {
+  await apiFetch<{ status: string }>("/auth/logout", { method: "POST" });
+}
+
+export async function me(): Promise<CurrentUser | null> {
+  try {
+    return await apiFetch<CurrentUser>("/auth/me");
+  } catch {
+    return null;
+  }
 }
 
 export interface TrackSummary {
