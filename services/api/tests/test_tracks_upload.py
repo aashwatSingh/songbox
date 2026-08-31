@@ -2,24 +2,16 @@ from __future__ import annotations
 
 import shutil
 import subprocess
-import uuid
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
 
 from app.acoustid.client import FixtureAcoustIDClient
 from app.acoustid.fixtures import KNOWN_MATCH_RESULT
 from app.fingerprint import fingerprint_audio
 from app.main import app
 from app.routes.tracks import get_acoustid_client
-
-client = TestClient(app)
-
-HEADERS = {
-    "X-Dev-Tenant-Id": str(uuid.uuid4()),
-    "X-Dev-User-Id": str(uuid.uuid4()),
-}
+from tests.conftest import AuthedClient
 
 
 def _make_tone(tmp_path: Path, frequency: int) -> Path:
@@ -56,7 +48,10 @@ def original_tone(tmp_path: Path) -> Path:
     return _make_tone(tmp_path, frequency=880)
 
 
-def test_lane_a_upload_of_known_commercial_fingerprint_is_held(commercial_tone: Path) -> None:
+def test_lane_a_upload_of_known_commercial_fingerprint_is_held(
+    commercial_tone: Path, authed_client: AuthedClient
+) -> None:
+    client = authed_client.client
     known_fp = fingerprint_audio(commercial_tone)
     app.dependency_overrides[get_acoustid_client] = lambda: FixtureAcoustIDClient(
         {known_fp.value: KNOWN_MATCH_RESULT}
@@ -65,7 +60,6 @@ def test_lane_a_upload_of_known_commercial_fingerprint_is_held(commercial_tone: 
         with commercial_tone.open("rb") as fh:
             response = client.post(
                 "/tracks/upload",
-                headers=HEADERS,
                 data={"lane": "A", "attestation_text": "I made this recording"},
                 files={"file": ("tone.wav", fh, "audio/wav")},
             )
@@ -76,14 +70,16 @@ def test_lane_a_upload_of_known_commercial_fingerprint_is_held(commercial_tone: 
     assert response.json()["status"] == "pending_review"
 
 
-def test_lane_a_upload_of_original_recording_passes(original_tone: Path) -> None:
+def test_lane_a_upload_of_original_recording_passes(
+    original_tone: Path, authed_client: AuthedClient
+) -> None:
+    client = authed_client.client
     # No entry for this fingerprint in the fixture client at all -> no match -> passes.
     app.dependency_overrides[get_acoustid_client] = lambda: FixtureAcoustIDClient({})
     try:
         with original_tone.open("rb") as fh:
             response = client.post(
                 "/tracks/upload",
-                headers=HEADERS,
                 data={"lane": "A", "attestation_text": "I made this recording"},
                 files={"file": ("tone.wav", fh, "audio/wav")},
             )
@@ -94,10 +90,10 @@ def test_lane_a_upload_of_original_recording_passes(original_tone: Path) -> None
     assert response.json()["status"] == "passed"
 
 
-def test_upload_rejects_truncated_header() -> None:
+def test_upload_rejects_truncated_header(authed_client: AuthedClient) -> None:
+    client = authed_client.client
     response = client.post(
         "/tracks/upload",
-        headers=HEADERS,
         data={"lane": "A", "attestation_text": "I made this recording"},
         files={"file": ("tone.wav", b"RIFF", "audio/wav")},
     )
@@ -105,10 +101,10 @@ def test_upload_rejects_truncated_header() -> None:
     assert response.json()["detail"] == "file does not match any accepted audio format"
 
 
-def test_upload_rejects_wrong_magic_bytes() -> None:
+def test_upload_rejects_wrong_magic_bytes(authed_client: AuthedClient) -> None:
+    client = authed_client.client
     response = client.post(
         "/tracks/upload",
-        headers=HEADERS,
         data={"lane": "A", "attestation_text": "I made this recording"},
         files={"file": ("tone.wav", b"this is plain text, not audio at all", "audio/wav")},
     )
@@ -116,11 +112,11 @@ def test_upload_rejects_wrong_magic_bytes() -> None:
     assert response.json()["detail"] == "file does not match any accepted audio format"
 
 
-def test_upload_rejects_playlist_with_remote_url() -> None:
+def test_upload_rejects_playlist_with_remote_url(authed_client: AuthedClient) -> None:
+    client = authed_client.client
     playlist = b"#EXTM3U\n#EXTINF:-1,Remote\nhttp://evil.example.com/payload.wav\n"
     response = client.post(
         "/tracks/upload",
-        headers=HEADERS,
         data={"lane": "A", "attestation_text": "I made this recording"},
         files={"file": ("playlist.wav", playlist, "audio/wav")},
     )
@@ -128,7 +124,8 @@ def test_upload_rejects_playlist_with_remote_url() -> None:
     assert response.json()["detail"] == "file does not match any accepted audio format"
 
 
-def test_upload_rejects_duration_bomb(tmp_path: Path) -> None:
+def test_upload_rejects_duration_bomb(tmp_path: Path, authed_client: AuthedClient) -> None:
+    client = authed_client.client
     ffmpeg = shutil.which("ffmpeg")
     assert ffmpeg
     out_path = tmp_path / "too_long.wav"
@@ -153,7 +150,6 @@ def test_upload_rejects_duration_bomb(tmp_path: Path) -> None:
     with out_path.open("rb") as fh:
         response = client.post(
             "/tracks/upload",
-            headers=HEADERS,
             data={"lane": "A", "attestation_text": "I made this recording"},
             files={"file": ("tone.wav", fh, "audio/wav")},
         )
@@ -161,13 +157,13 @@ def test_upload_rejects_duration_bomb(tmp_path: Path) -> None:
     assert "duration" in response.json()["detail"]
 
 
-def test_upload_rejects_file_over_the_size_cap() -> None:
+def test_upload_rejects_file_over_the_size_cap(authed_client: AuthedClient) -> None:
+    client = authed_client.client
     # Deliberately valid WAV magic bytes (RIFF at 0, WAVE at offset 8), so this proves the
     # size cap fires on its own rather than the format check rejecting the payload anyway.
     oversized = b"RIFF" + b"\x00" * 4 + b"WAVE" + b"\x00" * (151 * 1024 * 1024)
     response = client.post(
         "/tracks/upload",
-        headers=HEADERS,
         data={"lane": "A", "attestation_text": "I made this recording"},
         files={"file": ("tone.wav", oversized, "audio/wav")},
     )
