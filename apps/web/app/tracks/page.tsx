@@ -102,7 +102,7 @@ export default function TracksPage() {
   const reloadTracks = () => {
     listTracks()
       .then(setTracks)
-      .catch((err: Error) => setError(err.message));
+      .catch((err: Error) => setError(`Could not load tracks: ${err.message}`));
   };
 
   useEffect(() => {
@@ -310,7 +310,7 @@ export default function TracksPage() {
           </form>
         )}
 
-        {error && <p className="mt-6 text-red-400 text-sm">Could not load tracks: {error}</p>}
+        {error && <p className="mt-6 text-red-400 text-sm">{error}</p>}
 
         {tracks === null ? (
           <p className="mt-8 text-muted">Loading tracks...</p>

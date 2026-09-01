@@ -1408,7 +1408,44 @@ but not claimed as robust to navigation either.
 
 Verified: 191 backend tests passing (2 new: `has_stems` accuracy, mirroring the existing
 `has_transcription` test), 2 skipped (the gated live-Modal tests, unrelated). `ruff`/`mypy --strict`
-clean. `npm run build` clean.
+clean. `npm run build` clean. CI (`.github/workflows/ci.yml`) confirmed green on GitHub Actions after
+two real fixes: the `web` job had a pre-existing ESLint error
+(`react-hooks/set-state-in-effect` in `AuthContext.tsx`) and a stale unused-directive warning; the
+`api` job's `mypy app` step couldn't resolve `import modal` in `app/modal_app.py`/`app/gpu_backend.py`
+because CI's `pip install -e ".[dev]"` never installed the separate `modal` optional-dependency group
+that module needs -- fixed by installing `.[dev,modal]` in CI.
+
+**Live-verified in the Browser pane, end to end, against the real local dev stack:**
+- The player page's "Generate karaoke package" button correctly resumes a stuck track: clicked
+  against a track manually set to `passed` with no stems, it ran `/separate` (real Demucs
+  htdemucs inference, ~21s including a one-time model download from Hugging Face), then correctly
+  skipped straight to `/transcribe` on a later click once stems existed, then correctly skipped
+  straight to `/package` once transcription existed too -- confirming `runMissingPipelineStages()`
+  really does re-check state each time rather than blindly restarting.
+- The empty-transcription textarea path: typed free text into a zero-word track, hit Save, got a
+  real `POST /realign` call (200, ~1.7s) that returned a populated word-by-word editor -- the
+  honest "you supply the lyrics" path works end to end, not just in isolation.
+- The bookmark silent-catch fix is real: stopping the API and clicking Bookmark no longer does
+  nothing -- a real error is set. Found and fixed one rough edge in the same pass: the error banner
+  hard-coded a "Could not load tracks: " prefix even for bookmark/delete failures (all three share
+  one `error` state); moved that prefix into the list-load path specifically so bookmark/delete
+  errors show their own real message.
+- **The upload auto-chain itself could not be observed firing in this environment**: this dev
+  stack has no `ACOUSTID_API_KEY` set, so every real upload's fingerprint lookup fails and lands
+  the track at `status: pending_review` (lane A + failed lookup -> held for manual review, per
+  `gate.py`), never `passed` -- and the frontend correctly, honestly never auto-chains a
+  non-passed upload. This is a pre-existing environment gap, not a bug introduced here; verifying
+  the upload-time trigger literally requires either a real AcoustID key or an admin/reviewer path
+  (`POST /review-queue/{id}/resolve`) that has no frontend UI yet. The recovery-chain test above
+  exercises the identical `runMissingPipelineStages()` logic the upload path calls, just reached
+  from the player page instead of from a fresh upload.
+- **One pre-existing edge case noted, not fixed (out of scope here)**: if the API is unreachable
+  entirely (not just one failing endpoint), `AuthContext`'s background `/auth/me` check also fails,
+  `user` goes to `null`, and `apps/web/app/tracks/page.tsx`'s own effect immediately redirects to
+  `/login` -- which can unmount the page before a same-page error banner (like the bookmark fix
+  above) is visible. Confirmed this is pre-existing auth-redirect behavior, not something this
+  round of fixes touched; a real fix would mean `AuthContext` distinguishing "network/server
+  unreachable" from "genuinely logged out," which is a separate concern from this bug report.
 
 ## In flight
 
