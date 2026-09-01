@@ -5,7 +5,6 @@ import { useRouter } from "next/navigation";
 import { use, useEffect, useMemo, useRef, useState } from "react";
 import {
   deleteTrack,
-  generatePackage,
   getPackage,
   listTracks,
   stemUrl,
@@ -18,6 +17,7 @@ import {
   findActivePitchFrameIndex,
   type StemBuffers,
 } from "@/lib/player";
+import { PIPELINE_STAGE_LABELS, runMissingPipelineStages, type PipelineStage } from "@/lib/pipeline";
 import {
   BLEED_FLOOR_MARGIN_RMS,
   PitchTracker,
@@ -85,7 +85,13 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
   >(null);
   const [notReady, setNotReady] = useState(false);
   const [generating, setGenerating] = useState(false);
+  const [generatingStage, setGeneratingStage] = useState<PipelineStage | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Separate from `error` above deliberately -- `error` drives an early return that replaces the
+  // ENTIRE loaded player (see the `if (error)` branch below). Bookmark/Remove failures happen
+  // from inside the already-loaded player and must not wipe it out from under the user; they're
+  // shown inline near the buttons instead, same pattern as `micError` below.
+  const [actionError, setActionError] = useState<string | null>(null);
   const [loadingAudio, setLoadingAudio] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTimeMs, setCurrentTimeMs] = useState(0);
@@ -200,9 +206,19 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
 
   async function handleGenerate() {
     setGenerating(true);
+    setGeneratingStage(null);
     setError(null);
     try {
-      await generatePackage(id);
+      // Fetches the track's REAL current has_stems/has_transcription rather than assuming this
+      // is a fresh track -- this button also has to recover a track that already has some stages
+      // done (e.g. stems exist but transcription failed), and must never re-call /separate in
+      // that case (see runMissingPipelineStages' docstring for why that's not just a nicety).
+      const tracks = await listTracks();
+      const track = tracks.find((t) => t.track_id === id);
+      if (!track) {
+        throw new Error("track not found");
+      }
+      await runMissingPipelineStages(track, setGeneratingStage);
       const result = await getPackage(id);
       setPkg(result);
       setNotReady(false);
@@ -210,6 +226,7 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
       setError((err as Error).message);
     } finally {
       setGenerating(false);
+      setGeneratingStage(null);
     }
   }
 
@@ -449,11 +466,12 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
   }
 
   async function handleToggleBookmark() {
+    setActionError(null);
     try {
       const result = await toggleBookmark(id);
       setTrackMeta((prev) => (prev ? { ...prev, bookmarked: result.bookmarked } : prev));
-    } catch {
-      // Non-fatal -- the click just didn't take.
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Bookmark failed.");
     }
   }
 
@@ -461,11 +479,12 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
     if (!window.confirm("Delete this track? This can't be undone.")) {
       return;
     }
+    setActionError(null);
     try {
       await deleteTrack(id);
       router.push("/tracks");
     } catch (err) {
-      setError((err as Error).message);
+      setActionError((err as Error).message);
     }
   }
 
@@ -564,8 +583,15 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
             disabled={generating}
             className="rounded bg-accent px-4 py-2 text-white text-sm font-semibold disabled:opacity-50 hover:bg-accent-hover transition-colors"
           >
-            {generating ? "Generating..." : "Generate karaoke package"}
+            {generating
+              ? generatingStage
+                ? PIPELINE_STAGE_LABELS[generatingStage]
+                : "Starting…"
+              : "Generate karaoke package"}
           </button>
+          {generating && (
+            <p className="mt-2 text-xs text-muted">This can take a while on a real song.</p>
+          )}
         </main>
       </div>
     );
@@ -757,6 +783,8 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
             <span className="w-12 text-sm text-right text-muted">{tempoPercent}%</span>
           </div>
         </div>
+
+        {actionError && <p className="mt-6 text-red-400 text-sm">{actionError}</p>}
 
         <div className="mt-8 flex items-center justify-between border-t border-surface-border pt-6">
           <div className="flex items-center gap-3">

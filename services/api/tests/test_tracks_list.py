@@ -59,3 +59,24 @@ def test_list_tracks_reports_has_transcription_accurately(
     after = client.get("/tracks")
     after_entry = next(t for t in after.json() if t["track_id"] == track_id)
     assert after_entry["has_transcription"] is True
+
+
+def test_list_tracks_reports_has_stems_accurately(
+    synthetic_wav: Path, authed_client: AuthedClient
+) -> None:
+    # Lets the frontend know, even across a page refresh, whether it's safe to call /separate
+    # again -- that endpoint has no idempotency guard, so this field must reflect real Stem rows,
+    # not just "was /separate called in this browser session."
+    client = authed_client.client
+    track_id = _upload_and_pass_track(client, synthetic_wav)
+
+    before = client.get("/tracks")
+    before_entry = next(t for t in before.json() if t["track_id"] == track_id)
+    assert before_entry["has_stems"] is False
+
+    separate_response = client.post(f"/tracks/{track_id}/separate")
+    assert separate_response.status_code == 200
+
+    after = client.get("/tracks")
+    after_entry = next(t for t in after.json() if t["track_id"] == track_id)
+    assert after_entry["has_stems"] is True

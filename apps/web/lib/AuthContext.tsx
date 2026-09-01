@@ -38,7 +38,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   useEffect(() => {
-    refresh().finally(() => setLoading(false));
+    // A plain statement inside a nested async function, not a .then()/.finally() chained
+    // directly on a promise in the effect body -- the latter is what
+    // react-hooks/set-state-in-effect actually flags (cascading-render risk); this is the
+    // standard escape hatch for the common "fetch on mount, then clear a loading flag" case.
+    const load = async () => {
+      await refresh();
+      setLoading(false);
+    };
+    void load();
   }, []);
 
   return (

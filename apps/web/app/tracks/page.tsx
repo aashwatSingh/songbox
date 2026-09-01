@@ -12,6 +12,7 @@ import {
   type TrackSummary,
 } from "@/lib/api";
 import { useAuth } from "@/lib/AuthContext";
+import { PIPELINE_STAGE_LABELS, runMissingPipelineStages, type PipelineStage } from "@/lib/pipeline";
 
 function MusicNoteIcon() {
   return (
@@ -92,6 +93,11 @@ export default function TracksPage() {
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [busyTrackId, setBusyTrackId] = useState<string | null>(null);
+  // Tracks the auto-processing chain (separate -> transcribe -> package) that kicks off right
+  // after a passed upload. processingTrackId is null when nothing is running.
+  const [processingTrackId, setProcessingTrackId] = useState<string | null>(null);
+  const [processingStage, setProcessingStage] = useState<PipelineStage | null>(null);
+  const [processingError, setProcessingError] = useState<string | null>(null);
 
   const reloadTracks = () => {
     listTracks()
@@ -110,8 +116,29 @@ export default function TracksPage() {
       return;
     }
     reloadTracks();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- reloadTracks is stable per render intent
   }, [user]);
+
+  // Fetches the track's CURRENT has_stems/has_transcription (never trusts a stale snapshot) and
+  // runs whichever pipeline stages it's still missing. Safe to call again after a failure -- it
+  // re-checks real state each time, so it never re-runs a stage that already succeeded (see
+  // runMissingPipelineStages' own docstring for why that matters specifically for /separate).
+  const runPipelineFor = async (trackId: string) => {
+    setProcessingTrackId(trackId);
+    setProcessingError(null);
+    try {
+      const current = await listTracks();
+      const track = current.find((t) => t.track_id === trackId);
+      if (!track) {
+        throw new Error("track not found");
+      }
+      await runMissingPipelineStages(track, setProcessingStage);
+      setProcessingTrackId(null);
+      setProcessingStage(null);
+      reloadTracks();
+    } catch (err) {
+      setProcessingError(err instanceof Error ? err.message : "Processing failed.");
+    }
+  };
 
   const handleUpload = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -121,12 +148,22 @@ export default function TracksPage() {
     setUploadError(null);
     setUploading(true);
     try {
-      await uploadTrack(uploadFile, "I made this recording", uploadTitle, uploadArtist);
+      const result = await uploadTrack(
+        uploadFile,
+        "I made this recording",
+        uploadTitle,
+        uploadArtist
+      );
       setUploadFile(null);
       setUploadTitle("");
       setUploadArtist("");
       setShowUpload(false);
       reloadTracks();
+      // Only a "passed" upload has real content to process -- one held for manual review
+      // (pending_review) has nothing for separate/transcribe/package to work with yet.
+      if (result.status === "passed") {
+        void runPipelineFor(result.track_id);
+      }
     } catch (err) {
       setUploadError(err instanceof Error ? err.message : "Upload failed.");
     } finally {
@@ -139,8 +176,8 @@ export default function TracksPage() {
     try {
       await toggleBookmark(trackId);
       reloadTracks();
-    } catch {
-      // Non-fatal -- leave the list as-is, the click just didn't take.
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Bookmark failed.");
     } finally {
       setBusyTrackId(null);
     }
@@ -206,6 +243,27 @@ export default function TracksPage() {
         <p className="mt-2 text-sm text-muted">
           {tracks?.length ?? 0} track{tracks?.length === 1 ? "" : "s"} · {bookmarkedCount} bookmarked
         </p>
+
+        {processingTrackId && (
+          <div className="mt-6 flex items-center justify-between gap-4 rounded-lg border border-surface-border bg-surface p-4 max-w-md">
+            {processingError ? (
+              <>
+                <p className="text-sm text-red-400">{processingError}</p>
+                <button
+                  onClick={() => void runPipelineFor(processingTrackId)}
+                  className="shrink-0 rounded border border-accent px-3 py-1.5 text-sm font-medium text-accent hover:bg-surface-hover transition-colors"
+                >
+                  Retry
+                </button>
+              </>
+            ) : (
+              <p className="text-sm text-muted">
+                {processingStage ? PIPELINE_STAGE_LABELS[processingStage] : "Processing…"}
+                {" "}(this can take a while on a real song)
+              </p>
+            )}
+          </div>
+        )}
 
         {showUpload && (
           <form

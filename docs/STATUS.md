@@ -1350,6 +1350,66 @@ findings, all fixed:
 - All fixes verified together: forbidden-deps script clean on the real repo, its unit tests pass,
   `run_mypy_api.py` passes, API pytest/ruff/mypy all pass.
 
+## Done — post-M8: auto-processing pipeline, responsiveness fixes, honest empty-lyrics path
+
+A real bug report ("buttons aren't always responding") plus a request that would have needed
+auto-downloading matching audio from YouTube and scraping lyrics from Genius.com as a fallback for
+failed transcription. The YouTube/Genius part was declined outright, not built in any form -- it's
+exactly the failure mode the rights-gate system exists to block, not a legitimate fallback around
+it (see `CLAUDE.md`'s explicit `yt-dlp`/remote-media-fetch prohibition). What follows is the
+legitimate part.
+
+**Root causes found, all three real:**
+- Two silent-catch bugs: `apps/web/app/tracks/page.tsx`'s and
+  `apps/web/app/tracks/[id]/play/page.tsx`'s bookmark-toggle handlers both swallowed any API
+  failure with no visible feedback -- every other async handler in both files already surfaced
+  errors correctly; these two were the outliers. Fixed to match.
+- The real reason uploads never had lyrics: `POST /tracks/upload` only ever ran the rights gate --
+  the already-working `separate`/`transcribe`/`package` endpoints were never auto-triggered by
+  anything. There is no background job queue anywhere in this codebase (Redis is used only for
+  rate limiting), so every pipeline stage is a plain blocking synchronous HTTP endpoint; this is
+  why the frontend chains them client-side rather than enqueuing a job.
+- No `--reload` on the dev API server (`scripts/start-api.ps1`) -- backend code changes needed a
+  manual restart to take effect, a real, repeated source of "why doesn't this work" during active
+  development. Added.
+
+**What shipped:**
+- `has_stems` added to `TrackSummary`/`GET /tracks`, mirroring the existing `has_transcription`
+  field -- lets the frontend know, even across a page refresh, whether it's safe to call
+  `/separate` again. This matters because `/separate` has no idempotency guard (documented in
+  `tracks.py`'s own comments): calling it twice writes a second full set of Stem rows, and which
+  set later stages use becomes arbitrary. A naive "retry the whole chain on any failure" design
+  would have risked exactly that.
+- `apps/web/lib/pipeline.ts` (new): `runMissingPipelineStages()`, shared by both the upload
+  auto-chain and the player page's recovery button, always re-checks a track's real
+  `has_stems`/`has_transcription` before deciding what to run -- never blindly restarts from
+  `/separate`.
+- Upload auto-chains separate -> transcribe -> package for any track that passes the rights gate,
+  with per-stage progress labels ("Separating stems…" / "Transcribing lyrics…" / "Building
+  package…") and a retry button scoped to the failed stage on error.
+- The player page's "Generate karaoke package" button (previously only called `/package` directly,
+  409ing immediately on any track missing stems or transcription -- which was every track uploaded
+  before this fix) now runs the same stage-aware chain, so existing stuck tracks are recoverable
+  through the UI too, not just new uploads.
+- Real, honest handling of a genuinely empty transcription: `apps/web/app/tracks/[id]/page.tsx`'s
+  word-by-word editor had no way to add words that were never detected in the first place (Save
+  stayed permanently disabled at zero words). Replaced that dead end with a real textarea: if you
+  have the rights to the recording, type or paste the lyrics yourself. This is the honest
+  alternative to fetching someone else's copyrighted transcription from a third party.
+
+**Left explicitly `TODO: unmeasured`, not silently assumed:** real local-backend (not Modal)
+per-stage timing for a full-length track -- an earlier draft of this fix borrowed Modal
+cloud-backend numbers measured against a 3-second synthetic test track and called the chain
+"~60 seconds," which was wrong for the environment this actually runs against; the honest answer is
+this can take minutes on a real song, stated as such in the UI copy, not given a fabricated number.
+Also left open: no server-side "pipeline in progress" flag, so a browser refresh mid-chain
+abandons it silently -- no worse than the pre-fix baseline (which was permanently stuck either way),
+but not claimed as robust to navigation either.
+
+Verified: 191 backend tests passing (2 new: `has_stems` accuracy, mirroring the existing
+`has_transcription` test), 2 skipped (the gated live-Modal tests, unrelated). `ruff`/`mypy --strict`
+clean. `npm run build` clean.
+
 ## In flight
 
 - Nothing mid-work right now. M0, M1, M2, M3, M4a, M4b, M5, M6a, M6b, M6c, M7 (M7a/M7b/M7c), and M8
@@ -1359,9 +1419,10 @@ findings, all fixed:
   follow-up work (`docs/PLAN.md` open question 5, commit `d3ff5ff`), not a merge blocker. Real
   authentication is no longer an open gap — M8 closed `docs/PLAN.md` open question 9, replacing the
   dev-header stub with real email+password auth (see M8's entry above and
-  `docs/adr/0002-authentication-model.md`); two narrower gaps M8 itself surfaced (the `login()`
-  timing side-channel and the `test_expired_session_returns_401` isolation bug) remain open, tracked
-  in that same entry, not silently closed alongside the milestone. M6a closed the read-path
+  `docs/adr/0002-authentication-model.md`); one narrower gap M8 itself surfaced (the `login()`
+  timing side-channel) remains genuinely open, tracked in that same entry -- the
+  `test_expired_session_returns_401` isolation bug M8's own review also found was fixed within the
+  same milestone, not left pending. M6a closed the read-path
   sub-question of `docs/PLAN.md` open question 10 (the `GET /tracks/{id}/package` read endpoint,
   `karaoke.json` v1 assembly, and schema validation now exist). M6c built the
   live-mic-pitch-scoring mechanism (calibration, cents-based scoring against M6a's contour) but
@@ -1371,8 +1432,13 @@ findings, all fixed:
 
 ## Blocked
 
-- **No GitHub remote configured yet**, so `.github/workflows/ci.yml` has only been reasoned about, not
-  actually run by GitHub Actions. Not blocking M4/M5/M6 work, only CI-on-push.
+- (Resolved) A GitHub remote now exists (`github.com/aashwatSingh/songbox`, private) and
+  `.github/workflows/ci.yml` runs on every push. The first two real runs both failed: the `web` job
+  on a pre-existing ESLint error (`react-hooks/set-state-in-effect` in `AuthContext.tsx`) and a stale
+  unused-directive warning, both fixed and verified locally (`npm run lint` clean); the `api` job on
+  `mypy app` failing to resolve `import modal` in `app/modal_app.py`/`app/gpu_backend.py`, because CI's
+  `pip install -e ".[dev]"` never installed the separate `modal` optional-dependency group that module
+  needs — fixed by installing `.[dev,modal]` in CI. Not yet confirmed green on a fresh run.
 
 ## Next three actions
 

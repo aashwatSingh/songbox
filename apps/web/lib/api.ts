@@ -61,6 +61,7 @@ export interface TrackSummary {
   title: string | null;
   artist: string | null;
   duration_seconds: number | null;
+  has_stems: boolean;
   has_transcription: boolean;
   bookmarked: boolean;
 }
@@ -144,6 +145,19 @@ export async function deleteTrack(trackId: string): Promise<void> {
         : response.statusText;
     throw new Error(detail);
   }
+}
+
+export interface StemInfo {
+  stem_type: string;
+  storage_key: string;
+}
+
+export function separateTrack(trackId: string): Promise<{ track_id: string; stems: StemInfo[] }> {
+  return apiFetch(`/tracks/${trackId}/separate`, { method: "POST" });
+}
+
+export function transcribeTrack(trackId: string): Promise<TranscriptionResponse> {
+  return apiFetch<TranscriptionResponse>(`/tracks/${trackId}/transcribe`, { method: "POST" });
 }
 
 export function getTranscription(trackId: string): Promise<TranscriptionResponse> {

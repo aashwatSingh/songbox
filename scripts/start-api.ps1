@@ -64,7 +64,14 @@ try {
         Write-Error "Database migration failed."
         exit 1
     }
-    & $python -m uvicorn app.main:app --port 8000
+    # --reload: without it, backend code changes require killing and restarting this whole script
+    # to take effect -- a real, repeated source of confusion during development (a new/changed
+    # endpoint silently 404s or serves stale behavior until someone remembers to restart). Known
+    # tradeoff: once a request is genuinely long-running (the separate/transcribe/package pipeline
+    # chain can take minutes on a real song), a file save that triggers a reload mid-request will
+    # kill that in-flight request -- standard behavior for any hot-reloading dev server, not worth
+    # avoiding --reload over.
+    & $python -m uvicorn app.main:app --port 8000 --reload
 } finally {
     Pop-Location
 }

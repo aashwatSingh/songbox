@@ -146,6 +146,7 @@ class TrackSummary(BaseModel):
     title: str | None
     artist: str | None
     duration_seconds: float | None
+    has_stems: bool
     has_transcription: bool
     bookmarked: bool
 
@@ -158,6 +159,19 @@ def list_tracks(
     tracks = db.execute(
         select(Track).where(Track.tenant_id == identity.tenant_id)
     ).scalars().all()
+
+    # has_stems tells the frontend whether it's safe to call POST /tracks/{id}/separate again --
+    # that endpoint is NOT idempotent (no unique constraint stops a second call from writing a
+    # second full set of Stem rows, after which which set later stages use becomes arbitrary; see
+    # separate_track's and package_track's own docstrings below). Client-side "already ran
+    # separate" state alone would be lost on a page refresh; this field survives that.
+    stemmed_track_ids = set(
+        db.execute(
+            select(Stem.track_id)
+            .where(Stem.tenant_id == identity.tenant_id)
+            .distinct()
+        ).scalars().all()
+    )
 
     transcribed_track_ids = set(
         db.execute(
@@ -176,6 +190,7 @@ def list_tracks(
             duration_seconds=(
                 float(track.duration_seconds) if track.duration_seconds is not None else None
             ),
+            has_stems=track.id in stemmed_track_ids,
             has_transcription=track.id in transcribed_track_ids,
             bookmarked=track.bookmarked,
         )
