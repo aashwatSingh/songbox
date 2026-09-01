@@ -56,8 +56,22 @@ class HTTPAcoustIDClient:
             )
             response.raise_for_status()
             data = response.json()
-        except (httpx.HTTPError, ValueError) as exc:
-            return AcoustIDResult(matches=[], error=str(exc))
+        # Never let the exception's own string reach the caller. AcoustID authenticates via a
+        # `client=<api key>` QUERY PARAMETER (its API has no header auth), so httpx's error
+        # messages embed the full URL -- including the key. That string does not stay local: it
+        # flows into GateDecision.reason -> UploadResponse.reason (returned to the browser) and
+        # into fingerprint_matches.acoustid_response (persisted). Reporting the failure type and
+        # status code is enough to debug with, and keeps the credential out of both.
+        except httpx.HTTPStatusError as exc:
+            return AcoustIDResult(
+                matches=[], error=f"AcoustID returned HTTP {exc.response.status_code}"
+            )
+        except httpx.HTTPError as exc:
+            return AcoustIDResult(
+                matches=[], error=f"could not reach AcoustID ({type(exc).__name__})"
+            )
+        except ValueError:
+            return AcoustIDResult(matches=[], error="AcoustID returned a malformed response")
 
         if data.get("status") != "ok":
             status = data.get("status")
