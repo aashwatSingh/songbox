@@ -1,11 +1,15 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { use, useEffect, useMemo, useRef, useState } from "react";
 import {
+  deleteTrack,
   generatePackage,
   getPackage,
+  listTracks,
   stemUrl,
+  toggleBookmark,
   type PackageResponse,
 } from "@/lib/api";
 import {
@@ -22,15 +26,36 @@ import {
   measureBleedFloor,
 } from "@/lib/micScoring";
 
-function BackToTracksLink() {
+function BackArrowIcon() {
   return (
-    <Link
-      href="/tracks"
-      className="mb-4 inline-block text-sm font-medium text-blue-600 hover:underline"
-    >
-      &larr; Back to tracks
-    </Link>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="h-4 w-4">
+      <path d="M19 12H5M11 18l-6-6 6-6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
   );
+}
+
+function PlayFilledIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" className="h-5 w-5">
+      <path d="M6 4l14 8-14 8V4z" />
+    </svg>
+  );
+}
+
+function PauseIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" className="h-5 w-5">
+      <rect x="6" y="4" width="4" height="16" />
+      <rect x="14" y="4" width="4" height="16" />
+    </svg>
+  );
+}
+
+function formatTime(seconds: number): string {
+  const total = Math.max(0, Math.round(seconds));
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
 async function decodeStem(context: AudioContext, path: string): Promise<AudioBuffer> {
@@ -50,7 +75,14 @@ const STEM_ORDER: (keyof StemBuffers)[] = ["drums", "bass", "other"];
 
 export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
   const { id } = use(props.params);
+  const router = useRouter();
   const [pkg, setPkg] = useState<PackageResponse | null>(null);
+  // Cosmetic only (header title/artist) -- reuses the existing list endpoint rather than adding a
+  // new single-track GET route just for this. Silently stays null on failure; the header falls
+  // back to showing the track id, same as before this page had any title/artist display at all.
+  const [trackMeta, setTrackMeta] = useState<
+    { title: string | null; artist: string | null; bookmarked: boolean } | null
+  >(null);
   const [notReady, setNotReady] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -134,6 +166,24 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
           setError(err.message);
           setNotReady(false);
         }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
+
+  useEffect(() => {
+    let cancelled = false;
+    listTracks()
+      .then((tracks) => {
+        if (cancelled) return;
+        const match = tracks.find((t) => t.track_id === id);
+        if (match) {
+          setTrackMeta({ title: match.title, artist: match.artist, bookmarked: match.bookmarked });
+        }
+      })
+      .catch(() => {
+        // Non-fatal -- header just falls back to the track id.
       });
     return () => {
       cancelled = true;
@@ -398,6 +448,27 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
     playerRef.current?.setTempo(percent / 100);
   }
 
+  async function handleToggleBookmark() {
+    try {
+      const result = await toggleBookmark(id);
+      setTrackMeta((prev) => (prev ? { ...prev, bookmarked: result.bookmarked } : prev));
+    } catch {
+      // Non-fatal -- the click just didn't take.
+    }
+  }
+
+  async function handleRemove() {
+    if (!window.confirm("Delete this track? This can't be undone.")) {
+      return;
+    }
+    try {
+      await deleteTrack(id);
+      router.push("/tracks");
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
   function handlePitchChange(semitones: number) {
     setPitchSemitonesState(semitones);
     pitchSemitonesRef.current = semitones;
@@ -458,36 +529,52 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
       .join(" ");
   }, [pkg, durationMs, maxPitchHz]);
 
+  const headerTitle = trackMeta?.title ?? `Track ${id}`;
+  const headerArtist = trackMeta?.artist;
+
   if (error) {
     return (
-      <main className="max-w-2xl mx-auto py-12 px-6">
-        <BackToTracksLink />
-        <p className="text-red-600">{error}</p>
-      </main>
+      <div className="min-h-screen">
+        <header className="flex items-center gap-3 px-8 py-5 border-b border-surface-border">
+          <Link href="/tracks" className="text-accent hover:text-accent-hover">
+            <BackArrowIcon />
+          </Link>
+          <h1 className="text-lg font-bold">{headerTitle}</h1>
+        </header>
+        <main className="max-w-3xl mx-auto px-8 py-10">
+          <p className="text-red-400">{error}</p>
+        </main>
+      </div>
     );
   }
 
   if (notReady) {
     return (
-      <main className="max-w-2xl mx-auto py-12 px-6">
-        <BackToTracksLink />
-        <h1 className="text-2xl font-semibold mb-4">Track {id}</h1>
-        <p className="mb-4 text-zinc-600">No karaoke package exists for this track yet.</p>
-        <button
-          onClick={handleGenerate}
-          disabled={generating}
-          className="rounded bg-blue-600 px-4 py-2 text-white text-sm font-medium disabled:opacity-50"
-        >
-          {generating ? "Generating..." : "Generate karaoke package"}
-        </button>
-      </main>
+      <div className="min-h-screen">
+        <header className="flex items-center gap-3 px-8 py-5 border-b border-surface-border">
+          <Link href="/tracks" className="text-accent hover:text-accent-hover">
+            <BackArrowIcon />
+          </Link>
+          <h1 className="text-lg font-bold">{headerTitle}</h1>
+        </header>
+        <main className="max-w-3xl mx-auto px-8 py-10">
+          <p className="mb-4 text-muted">No karaoke package exists for this track yet.</p>
+          <button
+            onClick={handleGenerate}
+            disabled={generating}
+            className="rounded bg-accent px-4 py-2 text-white text-sm font-semibold disabled:opacity-50 hover:bg-accent-hover transition-colors"
+          >
+            {generating ? "Generating..." : "Generate karaoke package"}
+          </button>
+        </main>
+      </div>
     );
   }
 
   if (pkg === null) {
     return (
-      <main className="max-w-2xl mx-auto py-12 px-6">
-        <p>Loading...</p>
+      <main className="min-h-screen flex items-center justify-center">
+        <p className="text-muted">Loading...</p>
       </main>
     );
   }
@@ -496,166 +583,205 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
   const playheadX = (currentTimeMs / durationMs) * 400;
 
   return (
-    <main className="max-w-2xl mx-auto py-12 px-6">
-      <BackToTracksLink />
-      <h1 className="text-2xl font-semibold mb-4">Track {id}</h1>
-
-      {lyricsWithheld && (
-        <p className="mb-4 rounded bg-zinc-100 p-3 text-sm text-zinc-600">
-          Lyric display isn&apos;t permitted for this track &mdash; playing without lyrics.
-        </p>
-      )}
-
-      <div className="rounded bg-zinc-950 p-4 mb-4">
-        <div className="text-center text-lg mb-3 min-h-[1.75rem]">
-          {pkg.karaoke.words.map((word, idx) => (
-            <span
-              key={word.idx}
-              className={idx === activeWordIndex ? "text-blue-300 font-bold" : "text-zinc-500"}
-            >
-              {(word.text ?? "•") + " "}
-            </span>
-          ))}
+    <div className="min-h-screen">
+      <header className="flex items-center justify-between px-8 py-5 border-b border-surface-border">
+        <div className="flex items-center gap-3">
+          <Link href="/tracks" className="text-accent hover:text-accent-hover">
+            <BackArrowIcon />
+          </Link>
+          <h1 className="text-lg font-bold">{headerTitle}</h1>
         </div>
-        <svg viewBox="0 0 400 60" className="w-full h-[60px] block">
-          <polyline
-            points={pitchPoints}
-            fill="none"
-            stroke="#8fd6ff"
-            strokeWidth={2}
-          />
-          {activeFrameIndex >= 0 && (
-            <line
-              x1={playheadX}
-              y1={0}
-              x2={playheadX}
-              y2={60}
-              stroke="#fff"
-              strokeWidth={1.5}
-              opacity={0.6}
-            />
-          )}
-          {micState === "active" && liveHz !== null && (
-            <circle
-              cx={playheadX}
-              cy={60 - (liveHz / maxPitchHz) * 55}
-              r={4}
-              fill="#ff6b6b"
-            />
-          )}
-        </svg>
-      </div>
+        {headerArtist && <span className="text-sm text-muted">{headerArtist}</span>}
+      </header>
 
-      <div className="flex items-center gap-3">
-        <button
-          onClick={handlePlayPause}
-          disabled={loadingAudio || micState === "requesting" || micState === "calibrating"}
-          className="rounded bg-blue-600 px-4 py-2 text-white text-sm font-medium disabled:opacity-50"
-        >
-          {loadingAudio ? "Loading audio..." : isPlaying ? "Pause" : "Play"}
-        </button>
-        <input
-          type="range"
-          min={0}
-          max={effectiveDurationSeconds || 1}
-          step={0.1}
-          value={currentTimeMs / 1000}
-          onChange={handleSeek}
-          disabled={loadingAudio || micState === "requesting" || micState === "calibrating"}
-          className="flex-1"
-        />
-      </div>
+      <main className="max-w-3xl mx-auto px-8 py-10">
+        {lyricsWithheld && (
+          <p className="mb-4 rounded border border-surface-border bg-surface p-3 text-sm text-muted">
+            Lyric display isn&apos;t permitted for this track &mdash; playing without lyrics.
+          </p>
+        )}
 
-      <div className="mt-4">
-        {micState === "idle" && (
+        <div className="rounded-lg border border-surface-border bg-surface p-5">
+          <svg viewBox="0 0 400 60" className="w-full h-[70px] block">
+            <polyline points={pitchPoints} fill="none" stroke="#e2431f" strokeWidth={2} />
+            {activeFrameIndex >= 0 && (
+              <line
+                x1={playheadX}
+                y1={0}
+                x2={playheadX}
+                y2={60}
+                stroke="#f3efe7"
+                strokeWidth={1.5}
+                opacity={0.6}
+              />
+            )}
+            {micState === "active" && liveHz !== null && (
+              <circle cx={playheadX} cy={60 - (liveHz / maxPitchHz) * 55} r={4} fill="#f2582f" />
+            )}
+          </svg>
+        </div>
+
+        <div className="mt-4 flex items-center gap-3">
           <button
-            onClick={handleEnableMicScoring}
-            className="rounded border border-blue-600 px-4 py-2 text-blue-600 text-sm font-medium"
+            onClick={handlePlayPause}
+            disabled={loadingAudio || micState === "requesting" || micState === "calibrating"}
+            className="flex items-center justify-center rounded bg-accent p-3 text-white disabled:opacity-50 hover:bg-accent-hover transition-colors"
           >
-            Enable mic scoring
+            {loadingAudio ? (
+              <span className="text-xs px-1">...</span>
+            ) : isPlaying ? (
+              <PauseIcon />
+            ) : (
+              <PlayFilledIcon />
+            )}
           </button>
-        )}
-        {micState === "requesting" && (
-          <p className="text-sm text-zinc-500">Requesting microphone access...</p>
-        )}
-        {micState === "calibrating" && (
-          <p className="text-sm text-zinc-500">Stay quiet -- calibrating...</p>
-        )}
-        {micState === "active" && (
-          <div className="flex items-center gap-3">
-            <p className="text-sm text-zinc-600">
-              Mic scoring active &mdash;{" "}
-              {framesCounted === 0 ? "Listening..." : `${scorePercent.toFixed(0)}% on pitch`}
-            </p>
-            <button
-              onClick={handleDisableMicScoring}
-              className="rounded border border-zinc-400 px-3 py-1 text-zinc-600 text-xs font-medium"
-            >
-              Disable mic scoring
-            </button>
-          </div>
-        )}
-        {micError && <p className="mt-2 text-red-600 text-sm">{micError}</p>}
-      </div>
-
-      <div className="mt-6 border-t border-zinc-200 pt-4">
-        <h2 className="text-sm font-semibold mb-2">Mixer</h2>
-        {STEM_ORDER.map((stem) => (
-          <div key={stem} className="flex items-center gap-3 mb-2">
-            <span className="w-16 text-sm capitalize">{stem}</span>
-            <input
-              type="range"
-              min={0}
-              max={1}
-              step={0.05}
-              value={stemVolumes[stem]}
-              onChange={(e) => handleStemVolumeChange(stem, Number(e.target.value))}
-              disabled={stemMuted[stem]}
-              className="flex-1"
-            />
-            <button
-              onClick={() => handleStemMuteToggle(stem)}
-              className={`rounded px-2 py-1 text-xs font-medium ${
-                stemMuted[stem] ? "bg-red-100 text-red-700" : "bg-zinc-100 text-zinc-600"
-              }`}
-            >
-              {stemMuted[stem] ? "Muted" : "Mute"}
-            </button>
-          </div>
-        ))}
-      </div>
-
-      <div className="mt-4 border-t border-zinc-200 pt-4">
-        <h2 className="text-sm font-semibold mb-2">Transpose</h2>
-        <div className="flex items-center gap-3 mb-2">
-          <span className="w-16 text-sm">Key</span>
           <input
             type="range"
-            min={-6}
-            max={6}
-            step={1}
-            value={pitchSemitones}
-            onChange={(e) => handlePitchChange(Number(e.target.value))}
-            className="flex-1"
+            min={0}
+            max={effectiveDurationSeconds || 1}
+            step={0.1}
+            value={currentTimeMs / 1000}
+            onChange={handleSeek}
+            disabled={loadingAudio || micState === "requesting" || micState === "calibrating"}
+            className="flex-1 accent-[#e2431f]"
           />
-          <span className="w-12 text-sm text-right">
-            {pitchSemitones > 0 ? `+${pitchSemitones}` : pitchSemitones}
+          <span className="text-sm text-muted tabular-nums">
+            {formatTime(currentTimeMs / 1000)} / {formatTime(effectiveDurationSeconds)}
           </span>
         </div>
-        <div className="flex items-center gap-3">
-          <span className="w-16 text-sm">Tempo</span>
-          <input
-            type="range"
-            min={75}
-            max={125}
-            step={5}
-            value={tempoPercent}
-            onChange={(e) => handleTempoChange(Number(e.target.value))}
-            className="flex-1"
-          />
-          <span className="w-12 text-sm text-right">{tempoPercent}%</span>
+
+        <div className="mt-6">
+          {pkg.karaoke.words.length > 0 && (
+            <div className="mb-6 flex flex-wrap gap-x-1.5 gap-y-1 text-lg">
+              {pkg.karaoke.words.map((word, idx) => (
+                <span
+                  key={word.idx}
+                  className={
+                    idx === activeWordIndex ? "text-accent font-bold" : "text-muted"
+                  }
+                >
+                  {word.text ?? "•"}
+                </span>
+              ))}
+            </div>
+          )}
+
+          {micState === "idle" && (
+            <button
+              onClick={handleEnableMicScoring}
+              className="rounded border border-accent px-4 py-2 text-accent text-sm font-medium hover:bg-surface-hover transition-colors"
+            >
+              Enable mic scoring
+            </button>
+          )}
+          {micState === "requesting" && (
+            <p className="text-sm text-muted">Requesting microphone access...</p>
+          )}
+          {micState === "calibrating" && (
+            <p className="text-sm text-muted">Stay quiet -- calibrating...</p>
+          )}
+          {micState === "active" && (
+            <div className="flex items-center gap-3">
+              <p className="text-sm text-muted">
+                Mic scoring active &mdash;{" "}
+                {framesCounted === 0 ? "Listening..." : `${scorePercent.toFixed(0)}% on pitch`}
+              </p>
+              <button
+                onClick={handleDisableMicScoring}
+                className="rounded border border-surface-border px-3 py-1 text-muted text-xs font-medium hover:bg-surface-hover transition-colors"
+              >
+                Disable mic scoring
+              </button>
+            </div>
+          )}
+          {micError && <p className="mt-2 text-red-400 text-sm">{micError}</p>}
         </div>
-      </div>
-    </main>
+
+        <div className="mt-8 border-t border-surface-border pt-6">
+          <h2 className="text-sm font-bold mb-3">Mixer</h2>
+          {STEM_ORDER.map((stem) => (
+            <div key={stem} className="flex items-center gap-3 mb-2">
+              <span className="w-16 text-sm capitalize text-muted">{stem}</span>
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={stemVolumes[stem]}
+                onChange={(e) => handleStemVolumeChange(stem, Number(e.target.value))}
+                disabled={stemMuted[stem]}
+                className="flex-1 accent-[#e2431f]"
+              />
+              <button
+                onClick={() => handleStemMuteToggle(stem)}
+                className={`rounded px-2 py-1 text-xs font-medium border transition-colors ${
+                  stemMuted[stem]
+                    ? "border-accent bg-accent text-white"
+                    : "border-surface-border text-muted hover:bg-surface-hover"
+                }`}
+              >
+                {stemMuted[stem] ? "Muted" : "Mute"}
+              </button>
+            </div>
+          ))}
+        </div>
+
+        <div className="mt-6 border-t border-surface-border pt-6">
+          <h2 className="text-sm font-bold mb-3">Transpose</h2>
+          <div className="flex items-center gap-3 mb-2">
+            <span className="w-16 text-sm text-muted">Key</span>
+            <input
+              type="range"
+              min={-6}
+              max={6}
+              step={1}
+              value={pitchSemitones}
+              onChange={(e) => handlePitchChange(Number(e.target.value))}
+              className="flex-1 accent-[#e2431f]"
+            />
+            <span className="w-12 text-sm text-right text-muted">
+              {pitchSemitones > 0 ? `+${pitchSemitones}` : pitchSemitones}
+            </span>
+          </div>
+          <div className="flex items-center gap-3">
+            <span className="w-16 text-sm text-muted">Tempo</span>
+            <input
+              type="range"
+              min={75}
+              max={125}
+              step={5}
+              value={tempoPercent}
+              onChange={(e) => handleTempoChange(Number(e.target.value))}
+              className="flex-1 accent-[#e2431f]"
+            />
+            <span className="w-12 text-sm text-right text-muted">{tempoPercent}%</span>
+          </div>
+        </div>
+
+        <div className="mt-8 flex items-center justify-between border-t border-surface-border pt-6">
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => void handleToggleBookmark()}
+              className={`rounded px-4 py-2 text-sm font-semibold border transition-colors ${
+                trackMeta?.bookmarked
+                  ? "border-accent bg-accent text-white"
+                  : "border-accent text-accent hover:bg-surface-hover"
+              }`}
+            >
+              {trackMeta?.bookmarked ? "Bookmarked" : "Bookmark"}
+            </button>
+            <button
+              onClick={() => void handleRemove()}
+              className="rounded border border-surface-border px-4 py-2 text-sm font-semibold hover:bg-surface-hover transition-colors"
+            >
+              Remove
+            </button>
+          </div>
+          <Link href="/tracks" className="text-sm font-medium text-accent hover:underline">
+            &larr; Back to library
+          </Link>
+        </div>
+      </main>
+    </div>
   );
 }

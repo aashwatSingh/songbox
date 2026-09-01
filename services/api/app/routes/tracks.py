@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from app.acoustid.client import AcoustIDClient, HTTPAcoustIDClient
 from app.auth import Identity, get_identity
 from app.db import get_db
+from app.deletion import delete_track_content
 from app.fingerprint import FingerprintError, fingerprint_audio
 from app.gate import resolve_lane_outcome, resolve_lyrics_display_allowed
 from app.gpu_backend import (
@@ -142,8 +143,11 @@ class UploadResponse(BaseModel):
 class TrackSummary(BaseModel):
     track_id: uuid.UUID
     status: str
+    title: str | None
+    artist: str | None
     duration_seconds: float | None
     has_transcription: bool
+    bookmarked: bool
 
 
 @router.get("/tracks", response_model=list[TrackSummary])
@@ -167,13 +171,54 @@ def list_tracks(
         TrackSummary(
             track_id=track.id,
             status=track.status,
+            title=track.title,
+            artist=track.artist,
             duration_seconds=(
                 float(track.duration_seconds) if track.duration_seconds is not None else None
             ),
             has_transcription=track.id in transcribed_track_ids,
+            bookmarked=track.bookmarked,
         )
         for track in tracks
     ]
+
+
+class BookmarkResponse(BaseModel):
+    track_id: uuid.UUID
+    bookmarked: bool
+
+
+@router.post("/tracks/{track_id}/bookmark", response_model=BookmarkResponse)
+def toggle_bookmark(
+    track_id: uuid.UUID,
+    identity: Identity = Depends(get_identity),
+    db: Session = Depends(get_db),
+) -> BookmarkResponse:
+    track = db.get(Track, track_id)
+    if track is None or track.tenant_id != identity.tenant_id:
+        raise HTTPException(status_code=404, detail="track not found")
+    track.bookmarked = not track.bookmarked
+    db.flush()
+    return BookmarkResponse(track_id=track.id, bookmarked=track.bookmarked)
+
+
+@router.delete("/tracks/{track_id}", status_code=204)
+def delete_track(
+    track_id: uuid.UUID,
+    identity: Identity = Depends(get_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    # Self-service delete, distinct from admin takedown (app/routes/admin.py) -- this is the
+    # track's own owner removing their own content, not a compliance/moderation action, so
+    # there's no reason to keep a tombstone row the way takedown does. Reuses the same
+    # delete_track_content() helper takedown and retention purge already share (app/deletion.py).
+    track = db.get(Track, track_id)
+    if track is None or track.tenant_id != identity.tenant_id:
+        raise HTTPException(status_code=404, detail="track not found")
+    delete_track_content(db, track)
+    db.delete(track)
+    db.flush()
+    return Response(status_code=204)
 
 
 @router.post("/tracks/upload", response_model=UploadResponse)
@@ -184,6 +229,8 @@ def upload_track(
     file: UploadFile = File(...),
     lane: str = Form(...),
     attestation_text: str = Form(...),
+    title: str | None = Form(default=None),
+    artist: str | None = Form(default=None),
     license_id: uuid.UUID | None = Form(default=None),
     pd_cc_source: str | None = Form(default=None),
     pd_cc_license: str | None = Form(default=None),
@@ -258,11 +305,14 @@ def upload_track(
     track = Track(
         id=uuid.uuid4(),
         tenant_id=identity.tenant_id,
+        title=title,
+        artist=artist,
         duration_seconds=fp.duration_seconds,
         fingerprint=fp.value,
         rights_declaration_id=declaration.id,
         status=decision.outcome.value,
         storage_key=storage_key,
+        bookmarked=False,
     )
     db.add(track)
     db.flush()

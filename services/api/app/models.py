@@ -71,6 +71,7 @@ class Track(Base):
     # the takedown endpoint -- both null for every other status.
     takedown_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     takedown_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    bookmarked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
 
 class FingerprintMatch(Base):

@@ -58,8 +58,11 @@ export async function me(): Promise<CurrentUser | null> {
 export interface TrackSummary {
   track_id: string;
   status: string;
+  title: string | null;
+  artist: string | null;
   duration_seconds: number | null;
   has_transcription: boolean;
+  bookmarked: boolean;
 }
 
 export interface WordInfo {
@@ -88,11 +91,22 @@ export interface UploadResponse {
   reason: string;
 }
 
-export async function uploadTrack(file: File, attestationText: string): Promise<UploadResponse> {
+export async function uploadTrack(
+  file: File,
+  attestationText: string,
+  title?: string,
+  artist?: string,
+): Promise<UploadResponse> {
   const formData = new FormData();
   formData.append("file", file);
   formData.append("lane", "A");
   formData.append("attestation_text", attestationText);
+  if (title) {
+    formData.append("title", title);
+  }
+  if (artist) {
+    formData.append("artist", artist);
+  }
   // Raw fetch, not apiFetch() -- apiFetch() unconditionally sets Content-Type: application/json
   // whenever a body is present, which would break a multipart upload (the browser must set its
   // own Content-Type with the multipart boundary itself). credentials: "include" still applies,
@@ -111,6 +125,25 @@ export async function uploadTrack(file: File, attestationText: string): Promise<
     throw new Error(detail);
   }
   return response.json() as Promise<UploadResponse>;
+}
+
+export function toggleBookmark(trackId: string): Promise<{ track_id: string; bookmarked: boolean }> {
+  return apiFetch(`/tracks/${trackId}/bookmark`, { method: "POST" });
+}
+
+export async function deleteTrack(trackId: string): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/tracks/${trackId}`, {
+    method: "DELETE",
+    credentials: "include",
+  });
+  if (!response.ok) {
+    const body: unknown = await response.json().catch(() => null);
+    const detail =
+      body && typeof body === "object" && "detail" in body && typeof body.detail === "string"
+        ? body.detail
+        : response.statusText;
+    throw new Error(detail);
+  }
 }
 
 export function getTranscription(trackId: string): Promise<TranscriptionResponse> {

@@ -6,14 +6,16 @@ import { use, useEffect, useState } from "react";
 import { getTranscription, realignTrack, type TranscriptionResponse } from "@/lib/api";
 import { useAuth } from "@/lib/AuthContext";
 
-function BackToTracksLink() {
+function PageHeader({ id }: { id: string }) {
   return (
-    <Link
-      href="/tracks"
-      className="mb-4 inline-block text-sm font-medium text-blue-600 hover:underline"
-    >
-      &larr; Back to tracks
-    </Link>
+    <div className="mb-6 flex items-center gap-4">
+      <Link href="/tracks" className="text-sm font-medium text-accent hover:underline">
+        &larr; Back to tracks
+      </Link>
+      <Link href={`/tracks/${id}/play`} className="text-sm font-medium text-accent hover:underline">
+        Play &rarr;
+      </Link>
+    </div>
   );
 }
 
@@ -57,8 +59,8 @@ export default function TrackEditorPage(props: PageProps<"/tracks/[id]">) {
 
   if (authLoading || user === null) {
     return (
-      <main className="max-w-2xl mx-auto py-12 px-6">
-        <p>Loading...</p>
+      <main className="min-h-screen flex items-center justify-center">
+        <p className="text-muted">Loading...</p>
       </main>
     );
   }
@@ -66,20 +68,15 @@ export default function TrackEditorPage(props: PageProps<"/tracks/[id]">) {
   if (error && transcription === null) {
     return (
       <main className="max-w-2xl mx-auto py-12 px-6">
-        <div className="mb-4 flex items-center gap-4">
-          <BackToTracksLink />
-          <Link href={`/tracks/${id}/play`} className="text-sm font-medium text-blue-600 hover:underline">
-            Play &rarr;
-          </Link>
-        </div>
-        <p className="text-red-600">Could not load transcription: {error}</p>
+        <PageHeader id={id} />
+        <p className="text-red-400">Could not load transcription: {error}</p>
       </main>
     );
   }
   if (transcription === null) {
     return (
-      <main className="max-w-2xl mx-auto py-12 px-6">
-        <p>Loading...</p>
+      <main className="min-h-screen flex items-center justify-center">
+        <p className="text-muted">Loading...</p>
       </main>
     );
   }
@@ -87,14 +84,9 @@ export default function TrackEditorPage(props: PageProps<"/tracks/[id]">) {
   if (!transcription.lyrics_display_allowed) {
     return (
       <main className="max-w-2xl mx-auto py-12 px-6">
-        <div className="mb-4 flex items-center gap-4">
-          <BackToTracksLink />
-          <Link href={`/tracks/${id}/play`} className="text-sm font-medium text-blue-600 hover:underline">
-            Play &rarr;
-          </Link>
-        </div>
-        <h1 className="text-2xl font-semibold mb-4">Track {id}</h1>
-        <p className="rounded bg-zinc-100 p-4 text-zinc-700">
+        <PageHeader id={id} />
+        <h1 className="text-2xl font-bold mb-4">Track {id}</h1>
+        <p className="rounded border border-surface-border bg-surface p-4 text-muted">
           Lyric display isn&apos;t permitted for this track, so there&apos;s nothing to correct.
         </p>
       </main>
@@ -104,14 +96,9 @@ export default function TrackEditorPage(props: PageProps<"/tracks/[id]">) {
   if (transcription.language !== "en") {
     return (
       <main className="max-w-2xl mx-auto py-12 px-6">
-        <div className="mb-4 flex items-center gap-4">
-          <BackToTracksLink />
-          <Link href={`/tracks/${id}/play`} className="text-sm font-medium text-blue-600 hover:underline">
-            Play &rarr;
-          </Link>
-        </div>
-        <h1 className="text-2xl font-semibold mb-4">Track {id}</h1>
-        <p className="rounded bg-zinc-100 p-4 text-zinc-700">
+        <PageHeader id={id} />
+        <h1 className="text-2xl font-bold mb-4">Track {id}</h1>
+        <p className="rounded border border-surface-border bg-surface p-4 text-muted">
           Correction editing is English-only right now (detected language:{" "}
           {transcription.language}).
         </p>
@@ -119,7 +106,7 @@ export default function TrackEditorPage(props: PageProps<"/tracks/[id]">) {
           {transcription.words.map((word) => (
             <li key={word.idx} className="text-sm">
               {word.text ?? "(no text)"}{" "}
-              <span className="text-zinc-400">
+              <span className="text-muted">
                 {word.start_ms}ms - {word.end_ms}ms
               </span>
             </li>
@@ -131,13 +118,8 @@ export default function TrackEditorPage(props: PageProps<"/tracks/[id]">) {
 
   return (
     <main className="max-w-2xl mx-auto py-12 px-6">
-      <div className="mb-4 flex items-center gap-4">
-        <BackToTracksLink />
-        <Link href={`/tracks/${id}/play`} className="text-sm font-medium text-blue-600 hover:underline">
-          Play &rarr;
-        </Link>
-      </div>
-      <h1 className="text-2xl font-semibold mb-4">Track {id}</h1>
+      <PageHeader id={id} />
+      <h1 className="text-2xl font-bold mb-4">Track {id}</h1>
       <div className="flex flex-wrap gap-2 mb-6">
         {wordTexts.map((text, idx) => (
           <input
@@ -148,23 +130,23 @@ export default function TrackEditorPage(props: PageProps<"/tracks/[id]">) {
               next[idx] = e.target.value;
               setWordTexts(next);
             }}
-            className="border border-zinc-300 rounded px-2 py-1 text-sm w-24"
+            className="rounded border border-surface-border bg-surface px-2 py-1 text-sm w-24 focus:outline-none focus:border-accent"
           />
         ))}
       </div>
       {wordTexts.length === 0 && (
-        <p className="mb-4 text-sm text-zinc-500">
+        <p className="mb-4 text-sm text-muted">
           No words to correct &mdash; this track has no detected speech.
         </p>
       )}
       <button
         onClick={handleSave}
         disabled={saving || wordTexts.length === 0}
-        className="rounded bg-blue-600 px-4 py-2 text-white text-sm font-medium disabled:opacity-50"
+        className="rounded bg-accent px-4 py-2 text-white text-sm font-semibold disabled:opacity-50 hover:bg-accent-hover transition-colors"
       >
         {saving ? "Saving..." : "Save & re-align"}
       </button>
-      {error && <p className="mt-4 text-red-600 text-sm">{error}</p>}
+      {error && <p className="mt-4 text-red-400 text-sm">{error}</p>}
     </main>
   );
 }
