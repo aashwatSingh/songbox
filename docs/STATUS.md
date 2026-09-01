@@ -1475,7 +1475,11 @@ that module needs -- fixed by installing `.[dev,modal]` in CI.
   unused-directive warning, both fixed and verified locally (`npm run lint` clean); the `api` job on
   `mypy app` failing to resolve `import modal` in `app/modal_app.py`/`app/gpu_backend.py`, because CI's
   `pip install -e ".[dev]"` never installed the separate `modal` optional-dependency group that module
-  needs — fixed by installing `.[dev,modal]` in CI. Not yet confirmed green on a fresh run.
+  needs — fixed by installing `.[dev,modal]` in CI. Both fixes confirmed on real runs: CI is green
+  on runs #3 (`61f0b48`) and #4 (`02f5d50`), all three jobs passing. The `api` job takes ~10 minutes.
+  Note for future work: both failures passed locally first — `modal` happened to be installed in the
+  local venv, and `npm run lint` had never been run locally — so "it passes on my machine" is not
+  evidence CI will pass.
 
 ## Next three actions
 
@@ -1504,4 +1508,10 @@ that module needs -- fixed by installing `.[dev,modal]` in CI.
    check whether the separated vocal stem's audio quality degrades alignment precision versus the
    original mix, or investigate a systematic bias in the frame-to-millisecond conversion. Real work,
    not a merge blocker.
-3. Configure a GitHub remote so `.github/workflows/ci.yml` actually runs (see "Blocked" above).
+3. Get a real `ACOUSTID_API_KEY` into the local dev environment. Without it every upload's
+   fingerprint lookup fails and the gate holds the track at `pending_review`, so the upload-time
+   auto-processing chain never fires locally and can only be exercised through the player page's
+   recovery path (or by forcing `status='passed'` by hand in psql). This is currently the single
+   biggest gap between "works locally" and "works for a real user", and it also means no one has
+   observed the real lane-A pass path end to end. Related: there is still no frontend UI for the
+   reviewer flow that would clear a `pending_review` hold, so a held track is a dead end in the app.
