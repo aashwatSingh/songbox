@@ -1,7 +1,7 @@
 "use client";
 
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
-import { me, type CurrentUser } from "@/lib/api";
+import { login, me, type CurrentUser } from "@/lib/api";
 
 interface AuthContextValue {
   user: CurrentUser | null;
@@ -11,12 +11,29 @@ interface AuthContextValue {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
+// Demo-only, opt-in via .env.local (gitignored, never present in a real deployment). When set, an
+// unauthenticated visitor is transparently signed into a real, pre-existing demo account through
+// the REAL /auth/login endpoint -- this is not a security bypass of any kind, the backend's
+// session cookie and get_identity() enforcement are completely unmodified; it just skips showing
+// the manual login form for a recruiter/demo viewer who shouldn't need to know or type credentials.
+const DEMO_EMAIL = process.env.NEXT_PUBLIC_DEMO_EMAIL;
+const DEMO_PASSWORD = process.env.NEXT_PUBLIC_DEMO_PASSWORD;
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<CurrentUser | null>(null);
   const [loading, setLoading] = useState(true);
 
   const refresh = async () => {
-    const current = await me();
+    let current = await me();
+    if (current === null && DEMO_EMAIL && DEMO_PASSWORD) {
+      try {
+        await login(DEMO_EMAIL, DEMO_PASSWORD);
+        current = await me();
+      } catch {
+        // Demo account not reachable/provisioned -- fall through to the normal login page
+        // rather than masking a real problem.
+      }
+    }
     setUser(current);
   };
 

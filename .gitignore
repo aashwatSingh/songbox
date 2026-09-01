@@ -26,3 +26,7 @@ Thumbs.db
 .vscode/
 .idea/
 .superpowers/
+
+# Claude Code worktrees -- these are separate, potentially in-progress checkouts (own .git, own
+# node_modules/.next build output); never sweep one into a commit here.
+.claude/

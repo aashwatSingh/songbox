@@ -82,6 +82,37 @@ export function listTracks(): Promise<TrackSummary[]> {
   return apiFetch<TrackSummary[]>("/tracks");
 }
 
+export interface UploadResponse {
+  track_id: string;
+  status: string;
+  reason: string;
+}
+
+export async function uploadTrack(file: File, attestationText: string): Promise<UploadResponse> {
+  const formData = new FormData();
+  formData.append("file", file);
+  formData.append("lane", "A");
+  formData.append("attestation_text", attestationText);
+  // Raw fetch, not apiFetch() -- apiFetch() unconditionally sets Content-Type: application/json
+  // whenever a body is present, which would break a multipart upload (the browser must set its
+  // own Content-Type with the multipart boundary itself). credentials: "include" still applies,
+  // same as every other authenticated call.
+  const response = await fetch(`${API_BASE_URL}/tracks/upload`, {
+    method: "POST",
+    credentials: "include",
+    body: formData,
+  });
+  if (!response.ok) {
+    const body: unknown = await response.json().catch(() => null);
+    const detail =
+      body && typeof body === "object" && "detail" in body && typeof body.detail === "string"
+        ? body.detail
+        : response.statusText;
+    throw new Error(detail);
+  }
+  return response.json() as Promise<UploadResponse>;
+}
+
 export function getTranscription(trackId: string): Promise<TranscriptionResponse> {
   return apiFetch<TranscriptionResponse>(`/tracks/${trackId}/transcription`);
 }

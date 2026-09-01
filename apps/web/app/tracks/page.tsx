@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { listTracks, logout, type TrackSummary } from "@/lib/api";
+import { listTracks, logout, uploadTrack, type TrackSummary } from "@/lib/api";
 import { useAuth } from "@/lib/AuthContext";
 
 export default function TracksPage() {
@@ -11,6 +11,15 @@ export default function TracksPage() {
   const { user, loading: authLoading, refresh } = useAuth();
   const [tracks, setTracks] = useState<TrackSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
+
+  const reloadTracks = () => {
+    listTracks()
+      .then(setTracks)
+      .catch((err: Error) => setError(err.message));
+  };
 
   useEffect(() => {
     if (!authLoading && user === null) {
@@ -25,10 +34,27 @@ export default function TracksPage() {
     if (user === null) {
       return;
     }
-    listTracks()
-      .then(setTracks)
-      .catch((err: Error) => setError(err.message));
+    reloadTracks();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- reloadTracks is stable per render intent
   }, [user]);
+
+  const handleUpload = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!uploadFile) {
+      return;
+    }
+    setUploadError(null);
+    setUploading(true);
+    try {
+      await uploadTrack(uploadFile, "I made this recording");
+      setUploadFile(null);
+      reloadTracks();
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : "Upload failed.");
+    } finally {
+      setUploading(false);
+    }
+  };
 
   const handleLogout = async () => {
     try {
@@ -72,6 +98,28 @@ export default function TracksPage() {
           Log out
         </button>
       </div>
+      <form
+        onSubmit={(e) => void handleUpload(e)}
+        className="mb-8 flex flex-col gap-3 rounded border border-zinc-200 p-4"
+      >
+        <label className="flex flex-col gap-1">
+          <span className="text-sm font-medium">Upload a track</span>
+          <input
+            type="file"
+            accept="audio/*"
+            onChange={(e) => setUploadFile(e.target.files?.[0] ?? null)}
+            className="text-sm"
+          />
+        </label>
+        {uploadError && <p className="text-red-600 text-sm">{uploadError}</p>}
+        <button
+          type="submit"
+          disabled={!uploadFile || uploading}
+          className="self-start rounded bg-zinc-900 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+        >
+          {uploading ? "Uploading..." : "Upload"}
+        </button>
+      </form>
       {tracks.length === 0 ? (
         <p className="text-zinc-500">No tracks yet.</p>
       ) : (
