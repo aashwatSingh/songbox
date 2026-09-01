@@ -16,6 +16,42 @@ $python = "C:\Users\aashw\AppData\Local\Programs\Python\Python313\python.exe"
 $env:DATABASE_URL = "postgresql+psycopg://songbox:songbox@localhost:5433/songbox_demo"
 $env:APP_DATABASE_URL = "postgresql+psycopg://songbox_app:songbox_app@localhost:5433/songbox_demo"
 
+# Load secrets from services/api/.env (gitignored -- see .env.example for the format). Nothing else
+# in this project reads a .env file; the app itself only ever reads os.environ, so this script is
+# the single place that bridges the two. Values already set in the environment win, so a real
+# deployment's secret manager is never overridden by a stale local file.
+$envFile = Join-Path $apiDir ".env"
+if (Test-Path $envFile) {
+    foreach ($line in Get-Content $envFile) {
+        $trimmed = $line.Trim()
+        if ($trimmed -eq "" -or $trimmed.StartsWith("#")) { continue }
+        $split = $trimmed.IndexOf("=")
+        if ($split -lt 1) { continue }
+        $name = $trimmed.Substring(0, $split).Trim()
+        # Strip optional surrounding quotes; a pasted key often arrives wrapped in them.
+        $value = $trimmed.Substring($split + 1).Trim().Trim('"').Trim("'")
+        if (-not [Environment]::GetEnvironmentVariable($name)) {
+            Set-Item -Path "env:$name" -Value $value
+        }
+    }
+}
+
+# Say plainly what a missing key COSTS, rather than letting it fail silently downstream. Without it
+# every AcoustID lookup errors, and the gate's correct-but-confusing response is to HOLD the upload
+# at pending_review -- so every single upload looks like it silently did nothing. This warning
+# exists because that exact behavior burned real debugging time.
+if (-not $env:ACOUSTID_API_KEY) {
+    Write-Host ""
+    Write-Host "WARNING: ACOUSTID_API_KEY is not set." -ForegroundColor Yellow
+    Write-Host "  Every upload will be HELD at pending_review (the gate cannot verify" -ForegroundColor Yellow
+    Write-Host "  fingerprints), so auto-processing will never start. Get a key at" -ForegroundColor Yellow
+    Write-Host "  https://acoustid.org/new-application and put it in services\api\.env" -ForegroundColor Yellow
+    Write-Host "  as ACOUSTID_API_KEY=... (see services\api\.env.example)." -ForegroundColor Yellow
+    Write-Host ""
+} else {
+    Write-Host "ACOUSTID_API_KEY loaded (fingerprint checks enabled)."
+}
+
 function Test-DockerRunning {
     docker info *> $null
     return $LASTEXITCODE -eq 0
