@@ -72,7 +72,24 @@ def test_run_transcribe_dispatches_to_the_named_modal_function(
 
     assert result is fake_result
     from_name.assert_called_once_with("songbox-gpu", "run_transcribe")
-    assert fake_fn.calls == [(b"audio-bytes", "tiny")]
+    # Third positional arg is initial_prompt -- None here since the caller didn't supply one.
+    assert fake_fn.calls == [(b"audio-bytes", "tiny", None)]
+
+
+def test_run_transcribe_forwards_the_initial_prompt_to_modal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Biasing Whisper toward a track's own title/artist (see transcribe_audio's docstring for
+    the measured win this produced) only works if the prompt actually reaches the remote call."""
+    monkeypatch.setenv("GPU_BACKEND", "modal")
+    fake_fn = _FakeModalFunction(return_value=object())
+    monkeypatch.setattr("modal.Function.from_name", MagicMock(return_value=fake_fn))
+
+    run_transcribe(
+        b"audio-bytes", model_size="tiny", timeout_seconds=1800, initial_prompt="Song, Artist"
+    )
+
+    assert fake_fn.calls == [(b"audio-bytes", "tiny", "Song, Artist")]
 
 
 def test_run_realign_dispatches_to_the_named_modal_function(

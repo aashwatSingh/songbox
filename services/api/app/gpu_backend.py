@@ -170,14 +170,22 @@ def run_transcribe(
     *,
     model_size: str,
     timeout_seconds: float,
+    initial_prompt: str | None = None,
     run_transcription_and_alignment_fn: Callable[..., TranscriptionResult] | None = None,
 ) -> TranscriptionResult:
     """See run_separate()'s docstring for why `run_transcription_and_alignment_fn` exists --
     same reasoning, this time for tests/test_tracks_transcribe.py's
     `app.routes.tracks.run_transcription_and_alignment` patches (one of which supplies a fake
-    result outright, which only works if the patched callable is the one actually invoked)."""
+    result outright, which only works if the patched callable is the one actually invoked).
+
+    `initial_prompt` biases Whisper's decoding toward the track's own title/artist (see
+    transcribe_audio's docstring for the measured win this produced on a real track) -- it never
+    forces those words into the output, so an absent or wrong title/artist cannot corrupt an
+    otherwise-correct transcript."""
     if _active_backend() == "modal":
-        return _run_transcribe_modal(audio_bytes, model_size=model_size)
+        return _run_transcribe_modal(
+            audio_bytes, model_size=model_size, initial_prompt=initial_prompt
+        )
 
     if run_transcription_and_alignment_fn is not None:
         fn = run_transcription_and_alignment_fn
@@ -192,7 +200,7 @@ def run_transcribe(
         tmp.flush()
         tmp.close()
         result: TranscriptionResult = _run_local(
-            lambda: fn(Path(tmp.name), model_size=model_size),
+            lambda: fn(Path(tmp.name), model_size=model_size, initial_prompt=initial_prompt),
             timeout_seconds=timeout_seconds,
         )
         return result
@@ -200,13 +208,15 @@ def run_transcribe(
         Path(tmp.name).unlink(missing_ok=True)
 
 
-def _run_transcribe_modal(audio_bytes: bytes, *, model_size: str) -> TranscriptionResult:
+def _run_transcribe_modal(
+    audio_bytes: bytes, *, model_size: str, initial_prompt: str | None = None
+) -> TranscriptionResult:
     import modal
     import modal.exception
 
     fn = modal.Function.from_name("songbox-gpu", "run_transcribe")
     try:
-        return fn.remote(audio_bytes, model_size)  # type: ignore[no-any-return]
+        return fn.remote(audio_bytes, model_size, initial_prompt)  # type: ignore[no-any-return]
     except modal.exception.FunctionTimeoutError as exc:
         raise BackendTimeoutError(str(exc)) from exc
 

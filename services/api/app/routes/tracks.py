@@ -656,12 +656,19 @@ def transcribe_track(
     minio_client = get_minio_client()
     vocal_bytes = fetch_track_file(minio_client, vocals_stem.storage_key)
 
+    # Biases Whisper toward the track's own vocabulary rather than forcing it -- see
+    # transcribe_audio's docstring for the measured win (a real track's sung "Annihilate" was
+    # rendered as "I'm not late" without this). Either field can be None; join() skips falsy
+    # parts on its own, and an empty prompt is simply no bias, not an error.
+    initial_prompt = ", ".join(part for part in (track.title, track.artist) if part) or None
+
     with track_job_cost(track.id, "transcribe"):
         try:
             result = run_transcribe(
                 vocal_bytes,
                 model_size=model_size,
                 timeout_seconds=TRANSCRIPTION_TIMEOUT_SECONDS,
+                initial_prompt=initial_prompt,
                 run_transcription_and_alignment_fn=run_transcription_and_alignment,
             )
         except BackendBusyError as exc:

@@ -84,7 +84,11 @@ class TranscriptionResult:
     words: list[Word]
 
 
-def transcribe_audio(path: Path, model_size: str = DEFAULT_WHISPER_MODEL_SIZE) -> Transcript:
+def transcribe_audio(
+    path: Path,
+    model_size: str = DEFAULT_WHISPER_MODEL_SIZE,
+    initial_prompt: str | None = None,
+) -> Transcript:
     """Transcribe `path` with faster-whisper, requesting word-level timestamps directly from
     Whisper. Used as-is for non-English tracks (the "whisper_native" aligner path) and as the
     source text for English tracks, which then get forced-aligned by align_words() for tighter
@@ -113,6 +117,15 @@ def transcribe_audio(path: Path, model_size: str = DEFAULT_WHISPER_MODEL_SIZE) -
             # mishearing into a run of them (and occasionally a repeat loop).
             condition_on_previous_text=False,
             beam_size=5,
+            # Measured against a real track: without a prompt, Whisper (medium) rendered a sung
+            # "Annihilate" as "I'm not late" -- the word plausible-sounding but wrong, nothing in
+            # the acoustic signal to prefer the real one. Passing the track's own title/artist as
+            # initial_prompt fixed it (0 -> 1 occurrences of the correct word across the full
+            # track) at an ~18% time cost (345s -> 408s on that same 232s track). It only biases
+            # decoding toward this vocabulary, it does not force it -- so a wrong/missing
+            # title never corrupts an otherwise-correct transcript, only a genuinely ambiguous
+            # word gets nudged toward the hint.
+            initial_prompt=initial_prompt,
         )
         segment_list = list(segments)
     except Exception as exc:
@@ -271,12 +284,14 @@ def _unflatten[T](items: list[T], lengths: list[int]) -> list[list[T]]:
     return result
 
 
-def run_transcription_and_alignment(path: Path, model_size: str) -> TranscriptionResult:
+def run_transcription_and_alignment(
+    path: Path, model_size: str, initial_prompt: str | None = None
+) -> TranscriptionResult:
     """Orchestrates the full stage: transcribe, then align English tracks against their own
     transcript for tighter word-onset precision; non-English tracks keep Whisper's own word
     timings, since the alignment model here only covers English (see the design spec's
     licensing-blocked-multilingual-aligner scope decision)."""
-    transcript = transcribe_audio(path, model_size=model_size)
+    transcript = transcribe_audio(path, model_size=model_size, initial_prompt=initial_prompt)
     if not transcript.words:
         # No speech detected at all -- aligning empty text is meaningless (align_words() would
         # just raise AlignmentError on it), and there is trivially nothing for wav2vec2 to have

@@ -223,3 +223,65 @@ def test_transcribe_returns_504_when_it_exceeds_the_wall_clock_timeout(
     response = client.post(f"/tracks/{track_id}/transcribe")
 
     assert response.status_code == 504
+
+
+def test_transcribe_biases_whisper_with_the_tracks_own_title_and_artist(
+    monkeypatch: pytest.MonkeyPatch, synthetic_wav: Path, authed_client: AuthedClient
+) -> None:
+    """A real track's sung "Annihilate" was rendered as "I'm not late" by Whisper with no hint
+    to prefer the correct word. Passing the track's own title/artist as initial_prompt fixed it
+    (measured, see transcribe_audio's docstring) -- this only works end to end if the route
+    actually builds that prompt from the track's real title/artist and threads it through."""
+    client = authed_client.client
+    received: dict[str, object] = {}
+
+    def _capture(*args: object, **kwargs: object) -> TranscriptionResult:
+        received.update(kwargs)
+        return TranscriptionResult(text="", language="en", aligner="wav2vec2", words=[])
+
+    monkeypatch.setattr("app.routes.tracks.run_transcription_and_alignment", _capture)
+
+    app.dependency_overrides[get_acoustid_client] = lambda: FixtureAcoustIDClient({})
+    try:
+        with synthetic_wav.open("rb") as fh:
+            upload_response = client.post(
+                "/tracks/upload",
+                data={
+                    "lane": "A",
+                    "attestation_text": "I made this recording",
+                    "title": "Annihilate",
+                    "artist": "Metro Boomin",
+                },
+                files={"file": ("tone.wav", fh, "audio/wav")},
+            )
+    finally:
+        app.dependency_overrides.pop(get_acoustid_client, None)
+    assert upload_response.status_code == 200
+    track_id = upload_response.json()["track_id"]
+    assert client.post(f"/tracks/{track_id}/separate").status_code == 200
+
+    response = client.post(f"/tracks/{track_id}/transcribe")
+
+    assert response.status_code == 200
+    assert received.get("initial_prompt") == "Annihilate, Metro Boomin"
+
+
+def test_transcribe_omits_the_prompt_when_the_track_has_no_title_or_artist(
+    monkeypatch: pytest.MonkeyPatch, synthetic_wav: Path, authed_client: AuthedClient
+) -> None:
+    """No title/artist means nothing to bias toward -- must send None, not an empty string or a
+    stray ", " left over from joining two absent fields."""
+    client = authed_client.client
+    received: dict[str, object] = {}
+
+    def _capture(*args: object, **kwargs: object) -> TranscriptionResult:
+        received.update(kwargs)
+        return TranscriptionResult(text="", language="en", aligner="wav2vec2", words=[])
+
+    monkeypatch.setattr("app.routes.tracks.run_transcription_and_alignment", _capture)
+    track_id = _upload_pass_and_separate_track(client, synthetic_wav)
+
+    response = client.post(f"/tracks/{track_id}/transcribe")
+
+    assert response.status_code == 200
+    assert received.get("initial_prompt") is None
