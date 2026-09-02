@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   deleteTrack,
   listTracks,
@@ -98,6 +98,28 @@ export default function TracksPage() {
   const [processingTrackId, setProcessingTrackId] = useState<string | null>(null);
   const [processingStage, setProcessingStage] = useState<PipelineStage | null>(null);
   const [processingError, setProcessingError] = useState<string | null>(null);
+  const [dragActive, setDragActive] = useState(false);
+  // The file input stays mounted at all times, even while the form is hidden. Browsers only honor
+  // input.click() from inside a real user gesture, so "Upload track" has to reach an already-
+  // mounted node synchronously in its own onClick -- mounting the input as a side effect of
+  // opening the form and clicking it afterwards loses the gesture and the picker silently
+  // never opens.
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Prefill the title from the filename so uploads stop defaulting to "Untitled", but never
+  // overwrite something already typed.
+  const selectFile = (file: File | null) => {
+    setUploadFile(file);
+    if (file) {
+      setUploadError(null);
+      setUploadTitle((current) => current || file.name.replace(/\.[^.]+$/, ""));
+    }
+  };
+
+  const openFilePicker = () => {
+    setShowUpload(true);
+    fileInputRef.current?.click();
+  };
 
   const reloadTracks = () => {
     listTracks()
@@ -158,6 +180,11 @@ export default function TracksPage() {
       setUploadTitle("");
       setUploadArtist("");
       setShowUpload(false);
+      // Clear the input's own value too. Without this, re-picking the SAME file emits no change
+      // event (the value is unchanged), so a retry after a failed upload silently selects nothing.
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
       reloadTracks();
       // Only a "passed" upload has real content to process -- one held for manual review
       // (pending_review) has nothing for separate/transcribe/package to work with yet.
@@ -226,7 +253,7 @@ export default function TracksPage() {
         </Link>
         <div className="flex items-center gap-4">
           <button
-            onClick={() => setShowUpload((v) => !v)}
+            onClick={openFilePicker}
             className="flex items-center gap-2 rounded bg-accent px-4 py-2 text-sm font-semibold text-white hover:bg-accent-hover transition-colors"
           >
             <UploadIcon />
@@ -265,6 +292,16 @@ export default function TracksPage() {
           </div>
         )}
 
+        {/* Mounted unconditionally, outside the collapsible form -- see fileInputRef's note: the
+            header button must be able to click it synchronously within its own user gesture. */}
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="audio/*"
+          onChange={(e) => selectFile(e.target.files?.[0] ?? null)}
+          className="hidden"
+        />
+
         {showUpload && (
           <form
             onSubmit={(e) => void handleUpload(e)}
@@ -290,15 +327,36 @@ export default function TracksPage() {
                 className="rounded border border-surface-border bg-background px-3 py-2 text-sm"
               />
             </label>
-            <label className="flex flex-col gap-1">
+            <div className="flex flex-col gap-1">
               <span className="text-sm font-medium">Audio file</span>
-              <input
-                type="file"
-                accept="audio/*"
-                onChange={(e) => setUploadFile(e.target.files?.[0] ?? null)}
-                className="text-sm"
-              />
-            </label>
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setDragActive(true);
+                }}
+                onDragLeave={() => setDragActive(false)}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  setDragActive(false);
+                  selectFile(e.dataTransfer.files?.[0] ?? null);
+                }}
+                className={`rounded border border-dashed px-4 py-6 text-sm transition-colors ${
+                  dragActive
+                    ? "border-accent bg-surface-hover text-foreground"
+                    : "border-surface-border text-muted hover:border-accent hover:text-foreground"
+                }`}
+              >
+                {uploadFile ? (
+                  <span className="text-foreground font-medium">{uploadFile.name}</span>
+                ) : (
+                  <>
+                    Choose a file<span className="text-muted"> or drag it here</span>
+                  </>
+                )}
+              </button>
+            </div>
             {uploadError && <p className="text-red-400 text-sm">{uploadError}</p>}
             <button
               type="submit"
