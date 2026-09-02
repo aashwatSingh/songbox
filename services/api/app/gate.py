@@ -1,9 +1,27 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from enum import StrEnum
 
 from app.acoustid.client import AcoustIDResult
+
+
+def personal_mode_enabled() -> bool:
+    """Whether this deployment is a single-user personal install.
+
+    Songbox's gate is built for a multi-tenant service that accepts audio from strangers: it holds
+    anything it cannot positively clear, which is the right default there and the wrong one on a
+    laptop where the only user is the person who owns the files. On a personal install the hold has
+    nobody to escalate to -- there is no second human to review it -- so every track stops dead.
+
+    SONGBOX_PERSONAL_MODE=1 makes the gate record its findings and pass anyway. Read at call time
+    rather than import time so tests and a running server can toggle it.
+
+    Default OFF. It must stay off for any deployment serving more than one person: the gate is the
+    only thing standing between that deployment and processing content nobody has cleared.
+    """
+    return os.environ.get("SONGBOX_PERSONAL_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 class GateOutcome(StrEnum):
@@ -32,6 +50,22 @@ def resolve_lane_outcome(
 ) -> GateDecision:
     """Implements the lane x match-result table from
     docs/superpowers/specs/2026-08-19-rights-gate-design.md's Gate flow section."""
+
+    # Personal-install escape hatch. The fingerprint lookup above still ran and its real result is
+    # still written to fingerprint_matches, so the audit trail records what the gate SAW -- this
+    # only changes what it DOES about it. The reason string says so explicitly, so a track cleared
+    # this way is never mistaken for one that genuinely cleared the checks.
+    if personal_mode_enabled():
+        matched = acoustid_result.matches[0].release_title if acoustid_result.matches else None
+        detail = f"fingerprint matched {matched!r}" if matched else "no fingerprint match"
+        return GateDecision(
+            outcome=GateOutcome.PASSED,
+            resolution=FingerprintResolution.NO_MATCH,
+            reason=(
+                f"SONGBOX_PERSONAL_MODE is on: passing without enforcement ({detail}). "
+                "Not a rights clearance -- single-user install only."
+            ),
+        )
 
     if acoustid_result.error:
         return GateDecision(

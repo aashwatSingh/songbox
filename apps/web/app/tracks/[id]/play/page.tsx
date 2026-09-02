@@ -5,10 +5,12 @@ import { useRouter } from "next/navigation";
 import { use, useEffect, useMemo, useRef, useState } from "react";
 import {
   deleteTrack,
+  generatePackage,
   getPackage,
   listTracks,
   stemUrl,
   toggleBookmark,
+  transcribeTrack,
   type PackageResponse,
 } from "@/lib/api";
 import {
@@ -20,6 +22,7 @@ import {
 import { pendingStages, runMissingPipelineStages, type PipelineStage } from "@/lib/pipeline";
 import { estimateTotalSeconds, formatEstimate } from "@/lib/estimates";
 import { PipelineProgress } from "@/components/PipelineProgress";
+import { activeLineIndex, groupWordsIntoLines } from "@/lib/lyrics";
 import {
   BLEED_FLOOR_MARGIN_RMS,
   PitchTracker,
@@ -108,6 +111,7 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
   // from inside the already-loaded player and must not wipe it out from under the user; they're
   // shown inline near the buttons instead, same pattern as `micError` below.
   const [actionError, setActionError] = useState<string | null>(null);
+  const [regenerating, setRegenerating] = useState(false);
   const [loadingAudio, setLoadingAudio] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTimeMs, setCurrentTimeMs] = useState(0);
@@ -226,6 +230,23 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
       audioContextRef.current?.close();
     };
   }, []);
+
+  // Re-runs transcription and repackaging on a track that already has lyrics. Without this the
+  // chain skips both stages (has_transcription is already true), so an improvement to the Whisper
+  // settings could never reach a track that had been processed under the old ones.
+  async function handleRegenerateLyrics() {
+    setRegenerating(true);
+    setActionError(null);
+    try {
+      await transcribeTrack(id);
+      await generatePackage(id);
+      setPkg(await getPackage(id));
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Could not regenerate lyrics.");
+    } finally {
+      setRegenerating(false);
+    }
+  }
 
   async function handleGenerate() {
     setGenerating(true);
@@ -650,6 +671,14 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
   }
 
   const lyricsWithheld = pkg.karaoke.words.every((w) => w.text === null);
+  // Grouped from the transcription's own word timings -- see lib/lyrics.ts. Rendering every
+  // word into one wrapping container turned a whole song into a solid paragraph.
+  const lyricLines = groupWordsIntoLines(pkg.karaoke.words);
+  // findActiveWordIndex returns an ARRAY POSITION, while the lines carry each word's own `idx`
+  // field. Those happen to coincide today, but resolving the position to the real word makes the
+  // comparison correct by construction rather than by coincidence.
+  const activeWordId = pkg.karaoke.words[activeWordIndex]?.idx ?? -1;
+  const currentLineIndex = activeLineIndex(lyricLines, activeWordId);
   const playheadX = (currentTimeMs / durationMs) * 400;
 
   return (
@@ -721,18 +750,34 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
         </div>
 
         <div className="mt-6">
-          {pkg.karaoke.words.length > 0 && (
-            <div className="mb-6 flex flex-wrap gap-x-1.5 gap-y-1 text-lg">
-              {pkg.karaoke.words.map((word, idx) => (
-                <span
-                  key={word.idx}
-                  className={
-                    idx === activeWordIndex ? "text-accent font-bold" : "text-muted"
-                  }
-                >
-                  {word.text ?? "•"}
-                </span>
-              ))}
+          {lyricLines.length > 0 && (
+            <div className="mb-6 flex flex-col gap-3">
+              {lyricLines.map((line, lineIdx) => {
+                const isActiveLine = lineIdx === currentLineIndex;
+                return (
+                  <p
+                    key={line.startMs}
+                    className={`flex flex-wrap gap-x-2 leading-relaxed transition-all duration-200 ${
+                      isActiveLine
+                        ? "text-2xl text-foreground"
+                        : "text-lg text-muted/60"
+                    }`}
+                  >
+                    {line.words.map((word) => (
+                      <span
+                        key={word.idx}
+                        className={
+                          word.idx === activeWordId
+                            ? "text-accent font-bold"
+                            : undefined
+                        }
+                      >
+                        {word.text ?? "•"}
+                      </span>
+                    ))}
+                  </p>
+                );
+              })}
             </div>
           )}
 
@@ -827,6 +872,16 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
             <span className="w-12 text-sm text-right text-muted">{tempoPercent}%</span>
           </div>
         </div>
+
+        {pkg.karaoke.words.length > 0 && (
+          <button
+            onClick={() => void handleRegenerateLyrics()}
+            disabled={regenerating}
+            className="mt-2 rounded border border-surface-border px-3 py-1.5 text-xs font-medium text-muted disabled:opacity-50 hover:text-foreground hover:border-accent transition-colors"
+          >
+            {regenerating ? "Regenerating lyrics…" : "Regenerate lyrics"}
+          </button>
+        )}
 
         {actionError && <p className="mt-6 text-red-400 text-sm">{actionError}</p>}
 

@@ -12,6 +12,13 @@ the internet, touches heavily licensed content, and runs ML inference that costs
   writing code that downloads media from a URL the user doesn't control, stop.
 - **Nothing reaches a GPU without a rights-gate PASS.** The gate (attestation + Chromaprint/AcoustID
   fingerprint check + license/PD-CC resolution) runs before any job is enqueued to the worker pool.
+- **One documented exception: `SONGBOX_PERSONAL_MODE=1`** makes the gate record its findings and
+  pass anyway. It exists because a hold on a single-user install is a dead end — there is no second
+  human to escalate to, so every track stops forever. The fingerprint lookup still runs and its real
+  result is still written to `fingerprint_matches`; only enforcement changes, and the stored reason
+  says so explicitly. **Default OFF, and it must stay off for any deployment serving more than one
+  person.** Do not widen this into a general bypass, and do not add a second one: if a new situation
+  seems to need the gate turned off, that is a design discussion, not a flag.
 - Lyric display rights are tracked **separately** from recording rights (`covers_recording` vs
   `covers_lyrics` booleans on `licenses`). Missing lyric clearance is a supported degraded state (no
   lyric text rendered), not an error.

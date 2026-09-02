@@ -72,6 +72,10 @@ const SOUNDTOUCH_PROCESSOR_URL = "/soundtouch-processor.js";
 // lookup) benefits automatically without needing to know the worklet has latency at all.
 const SOUNDTOUCH_LATENCY_SECONDS = 0.132;
 
+// -3.5 dB. Leaves room for three summed stems plus worklet overshoot before the limiter has to
+// act at all; quiet enough to stop clipping, loud enough not to feel like a volume drop.
+const MASTER_HEADROOM_GAIN = 0.67;
+
 // Fixed iteration/indexing order for the three stems -- used both when constructing fresh
 // source/gain nodes in play() and when looking up which gain node a mixer change should apply to.
 const STEM_ORDER: (keyof StemBuffers)[] = ["drums", "bass", "other"];
@@ -93,6 +97,7 @@ export class StemPlayer {
   private sources: AudioBufferSourceNode[] = [];
   private gains: GainNode[] = [];
   private soundTouchNode: SoundTouchNode | null = null;
+  private masterGain: GainNode | null = null;
   private startedAtContextTime = 0;
   private startedAtOffsetSeconds = 0;
   private playing = false;
@@ -139,7 +144,26 @@ export class StemPlayer {
     const { SoundTouchNode } = await import("@soundtouchjs/audio-worklet");
     await SoundTouchNode.register(this.context, SOUNDTOUCH_PROCESSOR_URL);
     this.soundTouchNode = new SoundTouchNode({ context: this.context });
-    this.soundTouchNode.connect(this.context.destination);
+
+    // Master bus: headroom, then a safety limiter, then out.
+    //
+    // The three playback stems sum to approximately the original recording minus vocals, and a
+    // commercially mastered track already sits near 0 dBFS -- so summing them at unity clips, and
+    // the time-stretch worklet's own overshoot makes it worse. That crunch is what "the audio
+    // sounds off" actually is on a loud track. Backing off to -3.5 dB restores headroom, and the
+    // compressor is configured as a brick-wall-ish limiter to catch whatever still peaks rather
+    // than letting it wrap.
+    const master = this.context.createGain();
+    master.gain.value = MASTER_HEADROOM_GAIN;
+    const limiter = this.context.createDynamicsCompressor();
+    limiter.threshold.value = -1.5;
+    limiter.knee.value = 0;
+    limiter.ratio.value = 20;
+    limiter.attack.value = 0.003;
+    limiter.release.value = 0.15;
+    this.masterGain = master;
+    this.soundTouchNode.connect(master);
+    master.connect(limiter).connect(this.context.destination);
   }
 
   play(offsetSeconds = 0): void {
@@ -154,6 +178,11 @@ export class StemPlayer {
       const source = this.context.createBufferSource();
       source.buffer = this.buffers[stem];
       source.playbackRate.value = this.tempoMultiplier;
+      // Both this AND soundTouchNode.playbackRate below are set on purpose -- it is the library's
+      // documented pairing (see SoundTouchNode.d.ts's usage example). The buffer source does the
+      // actual speed change by resampling, which drags pitch with it; telling the node the same
+      // rate is how it knows how much pitch to compensate back out. Dropping either one leaves
+      // tempo and pitch fighting each other.
       const gain = this.context.createGain();
       gain.gain.value = this.stemMuted[stem] ? 0 : this.stemVolumes[stem];
       source.connect(gain).connect(this.soundTouchNode);

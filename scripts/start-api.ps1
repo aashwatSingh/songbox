@@ -52,6 +52,18 @@ if (-not $env:ACOUSTID_API_KEY) {
     Write-Host "ACOUSTID_API_KEY loaded (fingerprint checks enabled)."
 }
 
+# Say it out loud on every start. A gate that silently stopped enforcing is far worse than one
+# that is noisy about it, and this is exactly the kind of setting that gets turned on for a
+# local experiment and then forgotten about on a machine that later serves someone else.
+if ($env:SONGBOX_PERSONAL_MODE -and $env:SONGBOX_PERSONAL_MODE -notin @("0", "false", "no", "off")) {
+    Write-Host ""
+    Write-Host "SONGBOX_PERSONAL_MODE is ON -- the rights gate is NOT enforcing." -ForegroundColor Yellow
+    Write-Host "  Every upload passes regardless of what the fingerprint check finds." -ForegroundColor Yellow
+    Write-Host "  Intended for a single-user personal install only. Unset it in" -ForegroundColor Yellow
+    Write-Host "  services\api\.env before serving anyone else." -ForegroundColor Yellow
+    Write-Host ""
+}
+
 function Test-DockerRunning {
     docker info *> $null
     return $LASTEXITCODE -eq 0

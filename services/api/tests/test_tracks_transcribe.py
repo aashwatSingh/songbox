@@ -13,7 +13,7 @@ from app.db import db_session_for_tenant
 from app.fingerprint import fingerprint_audio
 from app.main import app
 from app.routes.tracks import get_acoustid_client
-from app.transcription import TranscriptionResult, Word
+from app.transcription import DEFAULT_WHISPER_MODEL_SIZE, TranscriptionResult, Word
 from tests.conftest import AuthedClient
 
 
@@ -76,7 +76,9 @@ def test_transcribe_stores_transcription_and_marks_lyrics_display_allowed_for_la
     finally:
         session.close()
     assert len(rows) == 1
-    assert rows[0].whisper_model == "base"
+    # Assert against the configured default, not a literal. Pinning "base" here meant that
+    # improving the default model broke this test for no real reason.
+    assert rows[0].whisper_model == DEFAULT_WHISPER_MODEL_SIZE
     assert rows[0].aligner == "whisper_native"
     assert rows[0].language
 

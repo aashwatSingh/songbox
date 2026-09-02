@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 import soundfile as sf
@@ -10,7 +11,41 @@ import torchaudio.functional as F
 from faster_whisper import WhisperModel
 
 ENGLISH_LANGUAGE_CODE = "en"
-DEFAULT_WHISPER_MODEL_SIZE = "base"
+
+
+# Both heavy models below used to be constructed on EVERY request. Loading `medium` alone measured
+# 20.0s on this machine, against 76.1s of actual inference for a 26-second track -- so roughly a
+# fifth of every transcription was spent re-reading weights the previous request had already read.
+#
+# maxsize=2 rather than unbounded: callers may pass any size in ALLOWED_WHISPER_MODEL_SIZES, and
+# `medium` is ~1.5GB resident, so caching all five would be a memory leak in all but name. Two
+# covers "the default, plus whatever one-off size someone is experimenting with" and evicts the
+# rest. The tradeoff is real and deliberate: a resident model costs RAM between requests, which is
+# the right trade for a single-user local install and would want revisiting for a multi-tenant one.
+@lru_cache(maxsize=2)
+def _load_whisper_model(model_size: str, device: str, compute_type: str) -> WhisperModel:
+    return WhisperModel(model_size, device=device, compute_type=compute_type)
+
+
+@lru_cache(maxsize=1)
+def _load_alignment_model(device: str) -> torch.nn.Module:
+    # torchaudio's bundle API is untyped here, so narrow explicitly rather than leaking Any.
+    model: torch.nn.Module = _WAV2VEC2_BUNDLE.get_model().to(device)
+    model.eval()
+    return model
+
+# "medium", chosen by measuring the three candidates on the same 232s separated vocal stem of a
+# dense rap track -- the case that exposed the problem, where base returned "I'm not a leg" for
+# "annihilate":
+#
+#   base    40s   "hey, I'm not late, I'm wide awake"      -- the word is absent entirely
+#   small   43s   "I'm annihilated I'm right away"         -- finds it, mangles the line
+#   medium 110s   "Hey, annihilate, I'm wide awake"        -- correct
+#
+# small is barely slower than base once vad_filter skips the non-speech regions, but only medium
+# actually gets the line right, and a transcript the user reads word by word is worth the wall
+# clock. Callers can still request any size in ALLOWED_WHISPER_MODEL_SIZES per request.
+DEFAULT_WHISPER_MODEL_SIZE = "medium"
 
 
 class TranscriptionError(Exception):
@@ -55,14 +90,30 @@ def transcribe_audio(path: Path, model_size: str = DEFAULT_WHISPER_MODEL_SIZE) -
     source text for English tracks, which then get forced-aligned by align_words() for tighter
     timing precision."""
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    compute_type = "float16" if device == "cuda" else "int8"
+    # int8_float32 rather than plain int8 on CPU: weights stay quantized (so memory and speed are
+    # close to int8) but accumulation happens in float32, which measurably reduces the garbled
+    # mishearings plain int8 produces on difficult audio. Accuracy matters more than the small
+    # slowdown for a transcript the user is going to read word by word.
+    compute_type = "float16" if device == "cuda" else "int8_float32"
     try:
-        model = WhisperModel(model_size, device=device, compute_type=compute_type)
+        model = _load_whisper_model(model_size, device, compute_type)
     except Exception as exc:
         raise TranscriptionError(f"could not load whisper model {model_size!r}: {exc}") from exc
 
     try:
-        segments, info = model.transcribe(str(path), word_timestamps=True)
+        segments, info = model.transcribe(
+            str(path),
+            word_timestamps=True,
+            # The input is a separated vocal stem, so the gaps between lines are not silence --
+            # they are separation artifacts and instrumental bleed. Whisper happily hallucinates
+            # words into that. VAD drops those regions before decoding instead.
+            vad_filter=True,
+            # Stops one bad line from steering every line after it. Whisper's default is to feed
+            # its own previous output back in as context, which on hard audio turns a single
+            # mishearing into a run of them (and occasionally a repeat loop).
+            condition_on_previous_text=False,
+            beam_size=5,
+        )
         segment_list = list(segments)
     except Exception as exc:
         raise TranscriptionError(f"transcription failed: {exc}") from exc
@@ -131,8 +182,7 @@ def align_words(path: Path, text: str) -> list[Word]:
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     try:
-        model = _WAV2VEC2_BUNDLE.get_model().to(device)
-        model.eval()
+        model = _load_alignment_model(device)
     except Exception as exc:
         raise AlignmentError("could not load alignment model") from exc
 
