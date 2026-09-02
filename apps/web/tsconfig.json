@@ -30,5 +30,6 @@
     ".next/dev/types/**/*.ts",
     "**/*.mts"
   ],
-  "exclude": ["node_modules"]
+  "// exclude note": "vitest.config.ts pulls in vitest's own bundled copy of vite, whose plugin types conflict with the rolldown-based vite Next 16 ships, so `next build` fails type-checking on that mismatch alone. The config itself is fine and vitest type-checks it when it runs. Only this file is excluded -- *.test.tsx stay in the build's type-check on purpose, so a test that stops compiling is caught.",
+  "exclude": ["node_modules", "vitest.config.ts"]
 }
