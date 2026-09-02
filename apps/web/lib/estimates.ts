@@ -1,34 +1,27 @@
 import type { PipelineStage } from "@/lib/pipeline";
 
 /**
- * Per-stage runtime estimates for the local CPU backend.
+ * Per-stage runtime estimates for the local GPU backend (CUDA, RTX 4060).
  *
  * Measured, not guessed -- each stage is a two-point linear fit
- * (`fixedSeconds + perAudioSecond * trackDuration`) through timings taken on this machine:
+ * (`fixedSeconds + perAudioSecond * trackDuration`) through timings taken from the server's own
+ * job_cost log, running the real pipeline end to end:
  *
  *   track length   separate   transcribe   package
- *   25.7s            21.8s        46.8s     15.7s
- *   231.9s          148.5s*      432.6s     46.1s*
+ *   25.7s             4.3s         8.0s      9.4s
+ *   231.8s           21.1s        69.6s     77.0s
  *
- * The two transcribe figures and the whole 25.7s row are clean. The starred 231.9s separate and
- * package figures were taken while another job was competing for the CPU, so they are high and the
- * two rates derived from them are conservative -- those stages will tend to finish early. Marked
- * rather than silently trusted; re-measure them on an idle machine to tighten the fit.
- *
- * The transcribe numbers are the important ones. An earlier version of this file was fitted
- * against the `base` Whisper model and never re-measured after the default moved to `medium` to
- * fix a real mistranscription. `medium` is ~9x slower: the 232s track was predicted at 47s and
- * actually took 432.6s (the server's own job_cost log). The bar therefore blew past its estimate
- * about a minute into a perfectly healthy six-minute run and displayed "taking longer than
- * expected" for the rest of it, which read as a hang. These figures come from real runs under the
- * current defaults.
+ * These replace a CPU-era fit. The machine now has a CUDA torch build, and the same 231.8s track
+ * that took 432.6s to transcribe on CPU takes 69.6s -- so the old numbers over-estimated by
+ * roughly 4-6x. An over-estimate is the safe direction (the bar finishes early rather than
+ * looking hung), but it is still wrong, so it is refit rather than left.
  *
  * Known limits, stated rather than papered over:
- *  - Two points per stage is a weak fit; good for "about six minutes", not for precision.
- *  - One machine, CPU only. There is an idle RTX 4060 in this box -- installing a CUDA torch build
- *    would invalidate every number here (in the good direction) and require a re-measure.
- *  - Timings vary with machine load. Several measurements this session were thrown off by other
- *    jobs running concurrently; these were taken with the pipeline as the only heavy work.
+ *  - Two points per stage is a weak fit; good for "about a minute", not for precision.
+ *  - One machine, one GPU. A CPU-only box will be far slower than these numbers suggest -- the
+ *    CPU-era fit for reference was separate 0.614, transcribe 1.871, package 0.147 s per
+ *    audio-second.
+ *  - Timings vary with machine load; these were taken with the pipeline as the only heavy work.
  *  - The FIRST run downloads model weights. COLD_START_EXTRA_SECONDS is a rough allowance for
  *    that, not a fitted value.
  */
@@ -38,12 +31,13 @@ interface StageRate {
 }
 
 const STAGE_RATES: Record<PipelineStage, StageRate> = {
-  // (148.5 - 21.8) / (231.9 - 25.7) = 0.614 s per audio-second; intercept 21.8 - 0.614*25.7 = 6.0
-  separating: { fixedSeconds: 6.0, perAudioSecond: 0.614 },
-  // (432.6 - 46.8) / (231.9 - 25.7) = 1.871; intercept 46.8 - 1.871*25.7 = -1.3, clamped to 0
-  transcribing: { fixedSeconds: 0.0, perAudioSecond: 1.871 },
-  // (46.1 - 15.7) / (231.9 - 25.7) = 0.147; intercept 15.7 - 0.147*25.7 = 11.9
-  packaging: { fixedSeconds: 11.9, perAudioSecond: 0.147 },
+  // (21.102 - 4.349) / (231.786 - 25.685) = 0.0813 s per audio-second; intercept 2.26
+  separating: { fixedSeconds: 2.3, perAudioSecond: 0.081 },
+  // (69.649 - 8.045) / 206.101 = 0.2989; intercept 0.37
+  transcribing: { fixedSeconds: 0.4, perAudioSecond: 0.299 },
+  // (77.011 - 9.422) / 206.101 = 0.3279; intercept 1.00. Package only became competitive after
+  // torchcrepe got an explicit batch_size -- unbatched on GPU it measured 170.3s here.
+  packaging: { fixedSeconds: 1.0, perAudioSecond: 0.328 },
 };
 
 /** Rough allowance for the first-ever run, which downloads model weights before any work starts. */

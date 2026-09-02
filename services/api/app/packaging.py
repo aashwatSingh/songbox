@@ -21,6 +21,11 @@ EXPECTED_SAMPLE_RATE = 44100
 EXPECTED_CHANNELS = 2
 
 CREPE_HOP_MS = 10
+
+# Frames per torchcrepe batch. 2048 was the value measured (see extract_pitch); the point is
+# that SOME bound exists rather than this exact number -- unbatched, GPU pitch extraction is
+# slower than CPU and scales VRAM with track length instead of with the batch.
+_CREPE_BATCH_SIZE = 2048
 # Voiced/unvoiced filtering cutoff for torchcrepe's periodicity score -- an unvalidated default,
 # not a value tuned or measured against any labeled singing dataset. Treat it as a reasonable
 # starting point, not a calibrated accuracy threshold.
@@ -157,6 +162,18 @@ def extract_pitch(vocals_path: Path, model: str = "tiny") -> list[PitchFrame]:
             model=model,
             return_periodicity=True,
             device=device,
+            # Without this, torchcrepe processes the WHOLE signal as a single batch -- ~23k frames
+            # for a 4-minute track. That is survivable on CPU but pathological on a consumer GPU:
+            # measured on a 231.8s vocal stem, same file, same code path:
+            #
+            #   GPU, no batch_size    123.7s   <- slower than the CPU it was meant to beat
+            #   CPU, no batch_size    106.9s
+            #   GPU, batch_size=2048   30.4s
+            #
+            # The GPU only wins once the work is chunked; unbatched it thrashes an 8GB card and
+            # loses to the CPU outright. This also bounds VRAM by batch rather than track length,
+            # so a longer track can no longer OOM a card that handled a shorter one.
+            batch_size=_CREPE_BATCH_SIZE,
         )
     except Exception as exc:
         raise PitchExtractionError("pitch extraction failed") from exc
