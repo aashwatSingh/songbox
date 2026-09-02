@@ -17,7 +17,9 @@ import {
   findActivePitchFrameIndex,
   type StemBuffers,
 } from "@/lib/player";
-import { PIPELINE_STAGE_LABELS, runMissingPipelineStages, type PipelineStage } from "@/lib/pipeline";
+import { pendingStages, runMissingPipelineStages, type PipelineStage } from "@/lib/pipeline";
+import { estimateTotalSeconds, formatEstimate } from "@/lib/estimates";
+import { PipelineProgress } from "@/components/PipelineProgress";
 import {
   BLEED_FLOOR_MARGIN_RMS,
   PitchTracker,
@@ -80,12 +82,26 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
   // Cosmetic only (header title/artist) -- reuses the existing list endpoint rather than adding a
   // new single-track GET route just for this. Silently stays null on failure; the header falls
   // back to showing the track id, same as before this page had any title/artist display at all.
+  // duration/has_stems/has_transcription come along so the Generate button can show an estimate
+  // BEFORE it is pressed, and size that estimate to the stages this track actually still needs.
   const [trackMeta, setTrackMeta] = useState<
-    { title: string | null; artist: string | null; bookmarked: boolean } | null
+    {
+      title: string | null;
+      artist: string | null;
+      bookmarked: boolean;
+      duration_seconds: number | null;
+      has_stems: boolean;
+      has_transcription: boolean;
+    } | null
   >(null);
   const [notReady, setNotReady] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [generatingStage, setGeneratingStage] = useState<PipelineStage | null>(null);
+  // Which stages this run will actually execute, and when it began -- both needed to draw
+  // a bar that spans the real remaining work rather than always assuming all three stages.
+  const [generatingStages, setGeneratingStages] = useState<PipelineStage[]>([]);
+  const [generatingStartedAt, setGeneratingStartedAt] = useState<number>(0);
+  const [generatingDuration, setGeneratingDuration] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Separate from `error` above deliberately -- `error` drives an early return that replaces the
   // ENTIRE loaded player (see the `if (error)` branch below). Bookmark/Remove failures happen
@@ -185,7 +201,14 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
         if (cancelled) return;
         const match = tracks.find((t) => t.track_id === id);
         if (match) {
-          setTrackMeta({ title: match.title, artist: match.artist, bookmarked: match.bookmarked });
+          setTrackMeta({
+            title: match.title,
+            artist: match.artist,
+            bookmarked: match.bookmarked,
+            duration_seconds: match.duration_seconds,
+            has_stems: match.has_stems,
+            has_transcription: match.has_transcription,
+          });
         }
       })
       .catch(() => {
@@ -218,6 +241,9 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
       if (!track) {
         throw new Error("track not found");
       }
+      setGeneratingStages(pendingStages(track));
+      setGeneratingDuration(track.duration_seconds);
+      setGeneratingStartedAt(Date.now());
       await runMissingPipelineStages(track, setGeneratingStage);
       const result = await getPackage(id);
       setPkg(result);
@@ -548,6 +574,14 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
       .join(" ");
   }, [pkg, durationMs, maxPitchHz]);
 
+  // Estimate shown before the button is pressed. Null until the track's duration is known --
+  // guessing a number without one would be exactly the kind of plausible-looking placeholder
+  // CLAUDE.md's measurement-discipline rule forbids.
+  const upfrontEstimate =
+    trackMeta && trackMeta.duration_seconds !== null
+      ? estimateTotalSeconds(pendingStages(trackMeta), trackMeta.duration_seconds)
+      : null;
+
   const headerTitle = trackMeta?.title ?? `Track ${id}`;
   const headerArtist = trackMeta?.artist;
 
@@ -578,19 +612,29 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
         </header>
         <main className="max-w-3xl mx-auto px-8 py-10">
           <p className="mb-4 text-muted">No karaoke package exists for this track yet.</p>
-          <button
-            onClick={handleGenerate}
-            disabled={generating}
-            className="rounded bg-accent px-4 py-2 text-white text-sm font-semibold disabled:opacity-50 hover:bg-accent-hover transition-colors"
-          >
-            {generating
-              ? generatingStage
-                ? PIPELINE_STAGE_LABELS[generatingStage]
-                : "Starting…"
-              : "Generate karaoke package"}
-          </button>
-          {generating && (
-            <p className="mt-2 text-xs text-muted">This can take a while on a real song.</p>
+          {generating ? (
+            <div className="max-w-md">
+              <PipelineProgress
+                stages={generatingStages}
+                currentStage={generatingStage}
+                trackDurationSeconds={generatingDuration}
+                startedAt={generatingStartedAt}
+              />
+            </div>
+          ) : (
+            <>
+              <button
+                onClick={handleGenerate}
+                className="rounded bg-accent px-4 py-2 text-white text-sm font-semibold hover:bg-accent-hover transition-colors"
+              >
+                Generate karaoke package
+              </button>
+              {upfrontEstimate !== null && (
+                <p className="mt-2 text-xs text-muted">
+                  Estimated {formatEstimate(upfrontEstimate)} on this machine.
+                </p>
+              )}
+            </>
           )}
         </main>
       </div>

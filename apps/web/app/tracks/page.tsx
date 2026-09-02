@@ -12,7 +12,8 @@ import {
   type TrackSummary,
 } from "@/lib/api";
 import { useAuth } from "@/lib/AuthContext";
-import { PIPELINE_STAGE_LABELS, runMissingPipelineStages, type PipelineStage } from "@/lib/pipeline";
+import { pendingStages, runMissingPipelineStages, type PipelineStage } from "@/lib/pipeline";
+import { PipelineProgress } from "@/components/PipelineProgress";
 
 function MusicNoteIcon() {
   return (
@@ -98,6 +99,11 @@ export default function TracksPage() {
   const [processingTrackId, setProcessingTrackId] = useState<string | null>(null);
   const [processingStage, setProcessingStage] = useState<PipelineStage | null>(null);
   const [processingError, setProcessingError] = useState<string | null>(null);
+  // Stages this run will actually execute, the track's duration, and the start time -- the
+  // three inputs PipelineProgress needs to size the bar to the real remaining work.
+  const [processingStages, setProcessingStages] = useState<PipelineStage[]>([]);
+  const [processingDuration, setProcessingDuration] = useState<number | null>(null);
+  const [processingStartedAt, setProcessingStartedAt] = useState<number>(0);
   const [dragActive, setDragActive] = useState(false);
   // The file input stays mounted at all times, even while the form is hidden. Browsers only honor
   // input.click() from inside a real user gesture, so "Upload track" has to reach an already-
@@ -153,6 +159,9 @@ export default function TracksPage() {
       if (!track) {
         throw new Error("track not found");
       }
+      setProcessingStages(pendingStages(track));
+      setProcessingDuration(track.duration_seconds);
+      setProcessingStartedAt(Date.now());
       await runMissingPipelineStages(track, setProcessingStage);
       setProcessingTrackId(null);
       setProcessingStage(null);
@@ -289,10 +298,14 @@ export default function TracksPage() {
                 </button>
               </>
             ) : (
-              <p className="text-sm text-muted">
-                {processingStage ? PIPELINE_STAGE_LABELS[processingStage] : "Processing…"}
-                {" "}(this can take a while on a real song)
-              </p>
+              <div className="w-full">
+                <PipelineProgress
+                  stages={processingStages}
+                  currentStage={processingStage}
+                  trackDurationSeconds={processingDuration}
+                  startedAt={processingStartedAt}
+                />
+              </div>
             )}
           </div>
         )}

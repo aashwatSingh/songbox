@@ -17,16 +17,36 @@ export async function runMissingPipelineStages(
   track: Pick<TrackSummary, "track_id" | "has_stems" | "has_transcription">,
   onStageStart: (stage: PipelineStage) => void,
 ): Promise<void> {
+  for (const stage of pendingStages(track)) {
+    onStageStart(stage);
+    if (stage === "separating") {
+      await separateTrack(track.track_id);
+    } else if (stage === "transcribing") {
+      await transcribeTrack(track.track_id);
+    } else {
+      await generatePackage(track.track_id);
+    }
+  }
+}
+
+/**
+ * Which stages this track still needs, in run order. Derived from the same real has_stems /
+ * has_transcription state runMissingPipelineStages uses, so a progress bar built from this spans
+ * exactly the work that is actually going to happen -- resuming a half-finished track shows a bar
+ * for the remaining stages only, instead of pretending it is starting from scratch.
+ */
+export function pendingStages(
+  track: Pick<TrackSummary, "has_stems" | "has_transcription">,
+): PipelineStage[] {
+  const stages: PipelineStage[] = [];
   if (!track.has_stems) {
-    onStageStart("separating");
-    await separateTrack(track.track_id);
+    stages.push("separating");
   }
   if (!track.has_transcription) {
-    onStageStart("transcribing");
-    await transcribeTrack(track.track_id);
+    stages.push("transcribing");
   }
-  onStageStart("packaging");
-  await generatePackage(track.track_id);
+  stages.push("packaging");
+  return stages;
 }
 
 export const PIPELINE_STAGE_LABELS: Record<PipelineStage, string> = {
