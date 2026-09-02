@@ -715,6 +715,15 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
   // since the auto-scroll effect that depends on them is a hook and must run unconditionally.
   const playheadX = (currentTimeMs / durationMs) * 400;
 
+  // currentLineIndex is -1 in exactly one case: before the FIRST word has started (see
+  // findActiveWordIndex -- once any word has begun, the active index only ever moves forward, so
+  // an instrumental gap mid-song still shows the last-sung line, not a blank countdown screen).
+  // That makes this precisely "time until singing starts", not a general gap detector.
+  const firstLineStartMs = lyricLines[0]?.startMs ?? 0;
+  const secondsUntilSinging = Math.max(0, (firstLineStartMs - currentTimeMs) / 1000);
+  const showSingingCountdown =
+    currentLineIndex === -1 && lyricLines.length > 0 && secondsUntilSinging > 0;
+
   return (
     <div className="min-h-screen">
       <header className="flex items-center justify-between px-8 py-5 border-b border-surface-border">
@@ -785,15 +794,36 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
 
         <div className="mt-6">
           {lyricLines.length > 0 && (
-            // Fixed-height, its own scroll -- the box scrolls, never the page. py-40 padding on
-            // the inner column is exactly half the box's h-80 (320px) height, so the FIRST and
+            // Fixed-height, its own scroll -- the box scrolls, never the page. py-48 padding on
+            // the inner column is exactly half the box's h-96 (384px) height, so the FIRST and
             // LAST lines can still be scrolled to dead center like every line in between; without
             // it they would hit the box edge instead of reaching the middle.
             <div
               ref={lyricsContainerRef}
-              className="relative mb-6 h-80 overflow-y-auto rounded-lg border border-surface-border bg-surface"
+              className="relative mb-6 h-96 overflow-y-auto rounded-lg border border-surface-border bg-surface"
             >
-              <div className="flex flex-col gap-5 px-6 py-40">
+              {showSingingCountdown && (
+                // Covers the box until the first word actually starts -- currentLineIndex only
+                // ever reads -1 in this one window (see its comment above), so this can never
+                // reappear mid-song during an instrumental break.
+                <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 bg-surface/95">
+                  {secondsUntilSinging > 3 ? (
+                    <>
+                      <p className="text-sm font-semibold uppercase tracking-wide text-muted">
+                        Get ready
+                      </p>
+                      <p className="text-3xl font-extrabold text-foreground tabular-nums">
+                        Starts in {Math.ceil(secondsUntilSinging)}s
+                      </p>
+                    </>
+                  ) : (
+                    <p className="text-8xl font-extrabold text-accent tabular-nums">
+                      {Math.ceil(secondsUntilSinging)}
+                    </p>
+                  )}
+                </div>
+              )}
+              <div className="flex flex-col gap-6 px-6 py-48">
                 {lyricLines.map((line, lineIdx) => {
                   const isActiveLine = lineIdx === currentLineIndex;
                   // Every word keeps its own highlight (word.idx === activeWordId) regardless of
@@ -802,10 +832,10 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
                   const distance =
                     currentLineIndex < 0 ? null : Math.abs(lineIdx - currentLineIndex);
                   const lineClass = isActiveLine
-                    ? "text-2xl font-semibold text-foreground"
+                    ? "text-3xl font-extrabold text-foreground"
                     : distance === 1
-                      ? "text-lg text-muted/70"
-                      : "text-lg text-muted/35";
+                      ? "text-xl font-bold text-muted/70"
+                      : "text-lg font-semibold text-muted/35";
                   return (
                     <p
                       key={line.startMs}
@@ -819,7 +849,7 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
                           key={word.idx}
                           className={
                             word.idx === activeWordId
-                              ? "text-accent font-bold"
+                              ? "text-accent"
                               : undefined
                           }
                         >
