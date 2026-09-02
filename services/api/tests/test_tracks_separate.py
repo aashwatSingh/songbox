@@ -14,7 +14,7 @@ from app.acoustid.fixtures import KNOWN_MATCH_RESULT
 from app.db import db_session_for_tenant
 from app.fingerprint import fingerprint_audio
 from app.main import app
-from app.routes.tracks import get_acoustid_client
+from app.routes.tracks import SeparateResponse, get_acoustid_client
 from app.storage import fetch_track_file, get_minio_client
 from tests.conftest import AuthedClient
 
@@ -151,3 +151,48 @@ def test_separate_returns_504_when_separation_exceeds_the_wall_clock_timeout(
     response = client.post(f"/tracks/{track_id}/separate")
 
     assert response.status_code == 504
+
+
+def test_separate_commits_stems_before_returning(
+    monkeypatch: pytest.MonkeyPatch, synthetic_wav: Path, authed_client: AuthedClient
+) -> None:
+    """The stems must be durable by the time the client sees 200, not merely flushed.
+
+    FastAPI runs a yield-dependency's exit code (get_db's session.commit()) AFTER the response is
+    sent. Relying on that teardown means /separate can answer 200 while its rows are still
+    uncommitted, so a client that immediately chains POST /transcribe -- which the frontend does
+    by design -- opens a new transaction, cannot see the vocals stem, and gets a spurious
+    "track has no vocals stem -- run /separate first". That was an observed intermittent failure.
+
+    Reading through a SEPARATE connection is what makes this a real test: the request's own
+    session would happily show its own uncommitted rows either way.
+    """
+    client = authed_client.client
+    track_id = _upload_and_pass_track(client, synthetic_wav)
+
+    visible_to_other_connection: list[int] = []
+
+    # Count the committed stem rows from an independent session at the moment the response is
+    # built, i.e. before get_db's teardown could commit anything.
+    original_response_cls = SeparateResponse
+
+    def _spy(*args: object, **kwargs: object) -> object:
+        other = db_session_for_tenant(authed_client.tenant_id)
+        try:
+            count = other.execute(
+                text("SELECT count(*) FROM stems WHERE track_id = :tid"), {"tid": track_id}
+            ).scalar_one()
+        finally:
+            other.close()
+        visible_to_other_connection.append(int(count))
+        return original_response_cls(*args, **kwargs)
+
+    monkeypatch.setattr("app.routes.tracks.SeparateResponse", _spy)
+
+    response = client.post(f"/tracks/{track_id}/separate")
+
+    assert response.status_code == 200
+    assert visible_to_other_connection == [4], (
+        f"expected all 4 stems committed and visible to another connection before responding, "
+        f"saw {visible_to_other_connection}"
+    )

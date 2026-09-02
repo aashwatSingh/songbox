@@ -501,7 +501,19 @@ def separate_track(
         )
         stems.append(StemInfo(stem_type=stem_type, storage_key=storage_key))
 
-    return SeparateResponse(track_id=track.id, stems=stems)
+    # Commit BEFORE returning, not in get_db's teardown. FastAPI runs a yield-dependency's exit
+    # code after the response has been sent, so without this the client can receive 200 OK while
+    # these Stem rows are still uncommitted -- and a client that immediately chains
+    # POST /transcribe (which the frontend does, by design) opens a new transaction that cannot
+    # see them yet and fails with "track has no vocals stem -- run /separate first".
+    #
+    # This was a real, observed intermittent failure, not a theoretical one. It hides easily: a
+    # trivial write commits in microseconds, so short endpoints never show it, while /separate
+    # holds its transaction open for the whole separation run. Capture the id first -- commit
+    # expires ORM attributes, and re-reading track.id afterwards would emit a needless query.
+    track_id_value = track.id
+    db.commit()
+    return SeparateResponse(track_id=track_id_value, stems=stems)
 
 
 class WordInfo(BaseModel):
@@ -656,7 +668,12 @@ def transcribe_track(
     db.add(transcription)
     db.flush()
 
-    return _transcription_to_response(transcription)
+    # Same reason as /separate above: the frontend chains POST /package straight off this
+    # response, and that stage reads this Transcription row back in a new transaction. Build the
+    # response body first -- commit expires the ORM attributes it reads.
+    response_body = _transcription_to_response(transcription)
+    db.commit()
+    return response_body
 
 
 @router.get("/tracks/{track_id}/transcription", response_model=TranscribeResponse)

@@ -1350,6 +1350,35 @@ findings, all fixed:
 - All fixes verified together: forbidden-deps script clean on the real repo, its unit tests pass,
   `run_mypy_api.py` passes, API pytest/ruff/mypy all pass.
 
+## Done — post-M8 followup: the chain's commit-visibility race, found by building a real demo
+
+Building a genuine demo track (spoken vocals -> Demucs -> Whisper -> package, 25 real synced words)
+surfaced the intermittent failure an earlier pass had logged as "seen once, unexplained, not
+reproducible": `POST /separate` returns 200, and the immediately-chained `POST /transcribe` fails
+with `track has no vocals stem -- run /separate first` while the stem rows are demonstrably in the
+database.
+
+**Cause:** FastAPI runs a `yield`-dependency's exit code after the response is sent, so `get_db`'s
+`session.commit()` happened *after* the client already had its 200. A client that chains the next
+stage immediately -- which the frontend does by design -- opens a new transaction that cannot yet
+see the previous stage's rows.
+
+**Why it hid for so long:** an earlier attempt to reproduce it used a trivial write (bookmark
+toggle) and saw 0 stale reads in 50 back-to-back attempts, which looked like proof the race did not
+exist. It was not: a tiny transaction commits in microseconds, while `/separate` holds one open for
+the entire separation run. The disproof was measuring the wrong endpoint, not the absence of a bug.
+
+**Fix:** `/separate` and `/transcribe` now commit explicitly before returning, rather than relying
+on dependency teardown. The regression test (`test_separate_commits_stems_before_returning`) reads
+through a *separate* connection at response-build time -- the request's own session would show its
+own uncommitted rows and prove nothing -- and was verified to fail against the old implementation
+and pass against the new one. 194 passed, 2 skipped; ruff and mypy --strict clean.
+
+**Still open from the same session:** `GET /tracks/{id}/package` and `/realign` were not given the
+same treatment. Neither is chained from immediately by the frontend today, so neither is known to
+be affected -- but the underlying teardown-ordering behavior applies to every write endpoint, so
+this is `TODO: unverified` rather than "not a problem".
+
 ## Done — post-M8: auto-processing pipeline, responsiveness fixes, honest empty-lyrics path
 
 A real bug report ("buttons aren't always responding") plus a request that would have needed
