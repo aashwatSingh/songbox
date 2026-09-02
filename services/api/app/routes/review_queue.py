@@ -100,4 +100,11 @@ def resolve_review(
     # itself (GateOutcome only has PASSED/HELD) -- it only exists from this endpoint.
     track.status = "passed" if body.approve else "rejected"
 
-    return ResolveReviewResponse(track_id=track.id, status=track.status)
+    # Commit before responding rather than leaving it to get_db's teardown, which FastAPI runs
+    # AFTER the response is sent. The review console reloads the queue the moment this returns,
+    # and without this that reload opens a new transaction that still sees the track as held --
+    # so an approval that genuinely succeeded looks like it did nothing. Build the response body
+    # first: commit expires the ORM attributes it reads.
+    response = ResolveReviewResponse(track_id=track.id, status=track.status)
+    db.commit()
+    return response

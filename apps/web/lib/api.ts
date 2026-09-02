@@ -66,6 +66,37 @@ export interface TrackSummary {
   bookmarked: boolean;
 }
 
+// A track the rights gate held rather than passed. Held is a normal, expected state -- a
+// fingerprint matched a commercial release, or the AcoustID lookup could not run at all -- and
+// only a human resolving it here can move the track to "passed" or "rejected".
+export interface ReviewQueueItem {
+  track_id: string;
+  status: string;
+  match_id: string;
+  resolution: string;
+  matched_release: string | null;
+  lane: string;
+  attestation_text: string;
+  user_id: string;
+  uploaded_at: string;
+  title: string | null;
+  artist: string | null;
+}
+
+export function listReviewQueue(): Promise<ReviewQueueItem[]> {
+  return apiFetch<ReviewQueueItem[]>("/review-queue");
+}
+
+export function resolveReview(
+  trackId: string,
+  approve: boolean,
+): Promise<{ track_id: string; status: string }> {
+  return apiFetch(`/review-queue/${trackId}/resolve`, {
+    method: "POST",
+    body: JSON.stringify({ approve }),
+  });
+}
+
 export interface WordInfo {
   idx: number;
   start_ms: number;

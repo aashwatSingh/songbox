@@ -214,7 +214,12 @@ def toggle_bookmark(
         raise HTTPException(status_code=404, detail="track not found")
     track.bookmarked = not track.bookmarked
     db.flush()
-    return BookmarkResponse(track_id=track.id, bookmarked=track.bookmarked)
+    # Commit before responding; get_db's teardown runs AFTER FastAPI sends the response,
+    # so a client that immediately re-reads (the frontend does) can miss this write.
+    # Build the response first -- commit expires the ORM attributes it reads.
+    response = BookmarkResponse(track_id=track.id, bookmarked=track.bookmarked)
+    db.commit()
+    return response
 
 
 @router.delete("/tracks/{track_id}", status_code=204)
@@ -232,6 +237,7 @@ def delete_track(
         raise HTTPException(status_code=404, detail="track not found")
     delete_track_content(db, track)
     db.delete(track)
+    db.commit()
     db.flush()
     return Response(status_code=204)
 
@@ -354,7 +360,14 @@ def upload_track(
     )
     db.add(match_row)
 
-    return UploadResponse(track_id=track.id, status=track.status, reason=decision.reason)
+    # Commit before responding; get_db's teardown runs AFTER FastAPI sends the response,
+    # so a client that immediately re-reads (the frontend does) can miss this write.
+    # Build the response first -- commit expires the ORM attributes it reads.
+    response_body = UploadResponse(
+        track_id=track.id, status=track.status, reason=decision.reason
+    )
+    db.commit()
+    return response_body
 
 
 class ConfirmAttestationRequest(BaseModel):
@@ -414,7 +427,12 @@ def confirm_attestation(
     )
     db.add(stronger)
 
-    return ConfirmAttestationResponse(track_id=track.id, status=track.status)
+    # Commit before responding; get_db's teardown runs AFTER FastAPI sends the response,
+    # so a client that immediately re-reads (the frontend does) can miss this write.
+    # Build the response first -- commit expires the ORM attributes it reads.
+    response = ConfirmAttestationResponse(track_id=track.id, status=track.status)
+    db.commit()
+    return response
 
 
 class StemInfo(BaseModel):
@@ -820,7 +838,12 @@ def realign_track(
     db.add(transcription)
     db.flush()
 
-    return _transcription_to_response(transcription)
+    # Commit before responding; get_db's teardown runs AFTER FastAPI sends the response,
+    # so a client that immediately re-reads (the frontend does) can miss this write.
+    # Build the response first -- commit expires the ORM attributes it reads.
+    response_body = _transcription_to_response(transcription)
+    db.commit()
+    return response_body
 
 
 class PackageRequest(BaseModel):
@@ -934,7 +957,10 @@ def package_track(
     db.add(package)
     db.flush()
 
-    return PackageResponse(
+    # Commit before responding; get_db's teardown runs AFTER FastAPI sends the response, so a
+    # client that immediately re-reads (the player fetches GET /package straight after this)
+    # can miss the write. Build the response first -- commit expires the ORM attributes it reads.
+    response_body = PackageResponse(
         track_id=package.track_id,
         schema_version=package.schema_version,
         words=[
@@ -952,6 +978,8 @@ def package_track(
         beats_ms=package.beats_ms,
         sections_ms=package.sections_ms,
     )
+    db.commit()
+    return response_body
 
 
 class PitchFrameOut(BaseModel):

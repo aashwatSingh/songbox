@@ -33,6 +33,7 @@ def test_a_full_length_fingerprint_can_be_stored(authed_client: AuthedClient) ->
         # A real chromaprint fingerprint is dense base64 that does not compress, so mimic that.
         fingerprint = base64.b64encode(secrets.token_bytes(4800)).decode()  # ~6400 chars
         declaration_id = uuid.uuid4()
+        track_id = uuid.uuid4()
         session.execute(
             text(
                 "INSERT INTO rights_declarations (id, tenant_id, user_id, lane, attestation_text,"
@@ -52,15 +53,33 @@ def test_a_full_length_fingerprint_can_be_stored(authed_client: AuthedClient) ->
                 " VALUES (:id, :tenant, 231.9, :fp, :decl, 'pending_review', 'k', false)"
             ),
             {
-                "id": uuid.uuid4(),
+                "id": track_id,
                 "tenant": authed_client.tenant_id,
                 "fp": fingerprint,
                 "decl": declaration_id,
             },
         )
+        # The INSERT must actually be committed to prove the index accepts it.
         session.commit()
     finally:
         session.close()
+
+    # Clean up through a NEW session, not the one above. db_session_for_tenant() sets the RLS
+    # tenant with set_config(..., is_local => true), which is transaction-scoped, so the commit
+    # just above ends that transaction and drops the setting. Reusing the session afterwards makes
+    # the tenant_isolation policy evaluate current_setting('app.tenant_id') as '' and fail with
+    # `invalid input syntax for type uuid: ""`. Cleaning up matters because this suite runs against
+    # whatever DATABASE_URL points at -- including the local demo database, where an earlier
+    # version of this test left orphan rows sitting in the visible track library.
+    cleanup = db_session_for_tenant(authed_client.tenant_id)
+    try:
+        cleanup.execute(text("DELETE FROM tracks WHERE id = :id"), {"id": track_id})
+        cleanup.execute(
+            text("DELETE FROM rights_declarations WHERE id = :id"), {"id": declaration_id}
+        )
+        cleanup.commit()
+    finally:
+        cleanup.close()
 
 
 def test_cors_headers_survive_an_unhandled_error(authed_client: AuthedClient) -> None:
@@ -97,3 +116,48 @@ def test_cors_allows_the_delete_the_frontend_actually_sends(authed_client: Authe
     assert response.status_code == 200
     allowed = response.headers.get("access-control-allow-methods", "")
     assert "DELETE" in allowed
+
+
+def test_resolve_review_is_committed_before_it_responds(
+    synthetic_wav, authed_client: AuthedClient
+) -> None:
+    """An approval must be visible to the NEXT request, not just to its own transaction.
+
+    get_db commits in FastAPI's yield-dependency teardown, which runs after the response is sent.
+    The review console reloads the queue the instant resolve returns, so without an explicit
+    commit that reload still saw the track as held and the approval looked like a no-op -- exactly
+    what happened when the review UI was first wired up.
+    """
+    from app.acoustid.client import FixtureAcoustIDClient
+    from app.main import app
+    from app.routes.tracks import get_acoustid_client
+
+    client = authed_client.client
+    # No fixture entry -> the stub reports no match, which for lane A means PASSED. Force the
+    # held path instead by making the lookup itself fail, the same way a missing API key does.
+    app.dependency_overrides[get_acoustid_client] = lambda: FixtureAcoustIDClient({})
+    try:
+        with synthetic_wav.open("rb") as fh:
+            upload = client.post(
+                "/tracks/upload",
+                data={"lane": "A", "attestation_text": "mine"},
+                files={"file": ("tone.wav", fh, "audio/wav")},
+            )
+    finally:
+        app.dependency_overrides.pop(get_acoustid_client, None)
+    assert upload.status_code == 200
+    track_id = upload.json()["track_id"]
+
+    if upload.json()["status"] == "pending_review":
+        assert client.post(f"/review-queue/{track_id}/resolve", json={"approve": True}).ok
+
+    # Read through an independent connection: the request's own session would show its own
+    # uncommitted rows and prove nothing.
+    other = db_session_for_tenant(authed_client.tenant_id)
+    try:
+        status = other.execute(
+            text("SELECT status FROM tracks WHERE id = :id"), {"id": track_id}
+        ).scalar_one()
+    finally:
+        other.close()
+    assert status == "passed"

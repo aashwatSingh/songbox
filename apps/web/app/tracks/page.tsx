@@ -248,9 +248,14 @@ export default function TracksPage() {
     <div className="min-h-screen">
       <header className="flex items-center justify-between px-8 py-5 border-b border-surface-border">
         <span className="text-xl font-bold tracking-tight">SongBox</span>
-        <Link href="/tracks" className="text-sm font-medium text-accent">
-          Library
-        </Link>
+        <nav className="flex items-center gap-6">
+          <Link href="/tracks" className="text-sm font-medium text-accent">
+            Library
+          </Link>
+          <Link href="/review" className="text-sm font-medium text-muted hover:text-foreground">
+            Review
+          </Link>
+        </nav>
         <div className="flex items-center gap-4">
           <button
             onClick={openFilePicker}
