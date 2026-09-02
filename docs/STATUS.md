@@ -1350,6 +1350,29 @@ findings, all fixed:
 - All fixes verified together: forbidden-deps script clean on the real repo, its unit tests pass,
   `run_mypy_api.py` passes, API pytest/ruff/mypy all pass.
 
+## Done — post-M8 followup: pipeline deduplication
+
+A real track finished with **8 stem rows (two complete sets), two transcriptions and two
+packages**. Two chains had been started for it, and `gpu_backend`'s `_inference_lock` did not stop
+that: it SERIALIZES heavy jobs but does not deduplicate them, so the second request waited its
+turn in the queue and then redid every stage. Both also passed the `has_stems` check, because
+neither had finished when the other looked.
+
+**Fix, in two halves, because one alone is not enough:**
+- `try_lock_track_pipeline()` (`app/db.py`) takes a per-track Postgres advisory lock, scoped to the
+  request's transaction so it cannot be leaked by a crash. `/separate`, `/transcribe`, `/realign`
+  and `/package` all take it and return **409** if another job holds it. `pg_try_advisory_xact_lock`
+  never blocks, so a duplicate fails fast instead of burning minutes in the inference queue.
+- `/separate` is now idempotent: holding that lock, it returns the existing stems rather than
+  producing a second set. The lock stops two SIMULTANEOUS runs; only this stops a sequential
+  repeat.
+
+`TODO: unmeasured` -- the pre-existing duplicate rows on the one affected track are left in place.
+`.limit(1)` still picks between a legacy pair arbitrarily; no backfill or cleanup migration was
+written for them.
+
+Both regression tests were verified to fail against the pre-fix code and pass after it.
+
 ## Done — post-M8 followup: the chain's commit-visibility race, found by building a real demo
 
 Building a genuine demo track (spoken vocals -> Demucs -> Whisper -> package, 25 real synced words)
@@ -1405,10 +1428,10 @@ legitimate part.
 **What shipped:**
 - `has_stems` added to `TrackSummary`/`GET /tracks`, mirroring the existing `has_transcription`
   field -- lets the frontend know, even across a page refresh, whether it's safe to call
-  `/separate` again. This matters because `/separate` has no idempotency guard (documented in
-  `tracks.py`'s own comments): calling it twice writes a second full set of Stem rows, and which
-  set later stages use becomes arbitrary. A naive "retry the whole chain on any failure" design
-  would have risked exactly that.
+  `/separate` again. At the time this mattered because `/separate` had no idempotency guard:
+  calling it twice wrote a second full set of Stem rows, and which set later stages used became
+  arbitrary. That gap is now closed server-side (see the deduplication entry above), but skipping
+  finished stages is still what keeps a retry cheap.
 - `apps/web/lib/pipeline.ts` (new): `runMissingPipelineStages()`, shared by both the upload
   auto-chain and the player page's recovery button, always re-checks a track's real
   `has_stems`/`has_transcription` before deciding what to run -- never blindly restarts from

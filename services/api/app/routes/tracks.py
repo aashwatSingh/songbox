@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.acoustid.client import AcoustIDClient, HTTPAcoustIDClient
 from app.auth import Identity, get_identity
-from app.db import get_db
+from app.db import get_db, try_lock_track_pipeline
 from app.deletion import delete_track_content
 from app.fingerprint import FingerprintError, fingerprint_audio
 from app.gate import resolve_lane_outcome, resolve_lyrics_display_allowed
@@ -160,11 +160,11 @@ def list_tracks(
         select(Track).where(Track.tenant_id == identity.tenant_id)
     ).scalars().all()
 
-    # has_stems tells the frontend whether it's safe to call POST /tracks/{id}/separate again --
-    # that endpoint is NOT idempotent (no unique constraint stops a second call from writing a
-    # second full set of Stem rows, after which which set later stages use becomes arbitrary; see
-    # separate_track's and package_track's own docstrings below). Client-side "already ran
-    # separate" state alone would be lost on a page refresh; this field survives that.
+    # has_stems lets the frontend skip a stage that is already done. /separate is now idempotent
+    # (it returns existing stems rather than producing a second set) and refuses a concurrent run
+    # for the same track, so this field is an optimisation rather than the only thing standing
+    # between a double-click and duplicate rows -- but it still matters, because client-side
+    # "already ran separate" state alone would be lost on a page refresh.
     stemmed_track_ids = set(
         db.execute(
             select(Stem.track_id)
@@ -475,6 +475,32 @@ def separate_track(
             detail=f"track has not passed the rights gate (status={track.status})",
         )
 
+    # Refuse a second in-flight job for this track instead of queueing behind the inference lock
+    # and redoing the work -- see try_lock_track_pipeline's docstring for the duplicate rows this
+    # prevents. Released automatically when this request's transaction ends.
+    if not try_lock_track_pipeline(db, track_id):
+        raise HTTPException(
+            status_code=409,
+            detail="another job is already running for this track; wait for it to finish",
+        )
+
+    # Idempotency, checked while holding the lock above so it cannot race another caller: if this
+    # track already has stems, hand back the existing ones rather than running separation again.
+    # A second run used to append a WHOLE second set of Stem rows, after which every later stage's
+    # `.limit(1)` vocals lookup picked between them arbitrarily. The lock stops two SIMULTANEOUS
+    # runs; this stops a sequential repeat, which no lock can catch.
+    existing_stems = db.execute(
+        select(Stem).where(Stem.track_id == track.id).order_by(Stem.stem_type)
+    ).scalars().all()
+    if existing_stems:
+        return SeparateResponse(
+            track_id=track.id,
+            stems=[
+                StemInfo(stem_type=stem.stem_type, storage_key=stem.storage_key)
+                for stem in existing_stems
+            ],
+        )
+
     minio_client = get_minio_client()
     original_bytes = fetch_track_file(minio_client, track.storage_key)
 
@@ -604,14 +630,21 @@ def transcribe_track(
             detail=f"track has not passed the rights gate (status={track.status})",
         )
 
-    # .limit(1) rather than a bare scalar_one_or_none(): /separate has no idempotency guard (a
-    # known, deliberately-deferred M3 limitation -- no unique constraint stops it from being
-    # called twice on the same track, which would write two full sets of 4 Stem rows), so more
-    # than one "vocals" row can legitimately exist here. scalar_one_or_none() raises
-    # MultipleResultsFound (an unhandled 500) in that case; Stem has no created_at column (also
-    # out of scope to add here) to pick "the most recent" set by, so which of the resulting stem
-    # sets gets used below is arbitrary -- a real fix belongs with /separate's idempotency gap,
-    # not here. Same pattern as get_transcription's order_by(...).limit(1) further down.
+    # Refuse a second in-flight job for this track instead of queueing behind the inference lock
+    # and redoing the work -- see try_lock_track_pipeline's docstring for the duplicate rows this
+    # prevents. Released automatically when this request's transaction ends.
+    if not try_lock_track_pipeline(db, track_id):
+        raise HTTPException(
+            status_code=409,
+            detail="another job is already running for this track; wait for it to finish",
+        )
+
+    # .limit(1) rather than a bare scalar_one_or_none(). /separate no longer creates duplicate
+    # stem sets, but rows written BEFORE that fix still exist (one real track carries two full
+    # sets), and scalar_one_or_none() would raise MultipleResultsFound -- an unhandled 500 -- on
+    # them. Stem has no created_at column to order by, so which of a legacy pair is chosen stays
+    # arbitrary; the guard against new duplicates is in separate_track above. Same pattern as
+    # get_transcription's order_by(...).limit(1) further down.
     vocals_stem = db.execute(
         select(Stem).where(Stem.track_id == track.id, Stem.stem_type == "vocals").limit(1)
     ).scalar_one_or_none()
@@ -743,6 +776,15 @@ def realign_track(
         raise HTTPException(
             status_code=409,
             detail=f"track has not passed the rights gate (status={track.status})",
+        )
+
+    # Refuse a second in-flight job for this track instead of queueing behind the inference lock
+    # and redoing the work -- see try_lock_track_pipeline's docstring for the duplicate rows this
+    # prevents. Released automatically when this request's transaction ends.
+    if not try_lock_track_pipeline(db, track_id):
+        raise HTTPException(
+            status_code=409,
+            detail="another job is already running for this track; wait for it to finish",
         )
 
     latest = db.execute(
@@ -884,6 +926,15 @@ def package_track(
         raise HTTPException(
             status_code=409,
             detail=f"track has not passed the rights gate (status={track.status})",
+        )
+
+    # Refuse a second in-flight job for this track instead of queueing behind the inference lock
+    # and redoing the work -- see try_lock_track_pipeline's docstring for the duplicate rows this
+    # prevents. Released automatically when this request's transaction ends.
+    if not try_lock_track_pipeline(db, track_id):
+        raise HTTPException(
+            status_code=409,
+            detail="another job is already running for this track; wait for it to finish",
         )
 
     stem_rows = db.execute(select(Stem).where(Stem.track_id == track.id)).scalars().all()

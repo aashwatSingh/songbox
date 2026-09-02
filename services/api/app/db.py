@@ -29,6 +29,37 @@ def get_engine() -> Engine:
     return _engine
 
 
+# Namespace for the pipeline's advisory locks, so a track-id hash here can never collide with an
+# advisory lock taken for some unrelated purpose. Arbitrary constant, must fit in a signed int32.
+PIPELINE_LOCK_NAMESPACE = 0x50495045  # "PIPE"
+
+
+def try_lock_track_pipeline(session: Session, track_id: uuid.UUID) -> bool:
+    """Take a per-track lock for the life of this transaction. False if someone else holds it.
+
+    gpu_backend's _inference_lock already stops two heavy jobs running at the same instant, but it
+    only SERIALIZES them -- a second request for the same track waits its turn and then does the
+    work all over again. That is how a real track ended up with 8 stem rows (two complete sets),
+    two transcriptions and two packages: two chains were started, both passed the has_stems check
+    while neither had finished, and both ran to completion.
+
+    This deduplicates instead of queueing. pg_try_advisory_xact_lock never blocks -- it returns
+    false immediately -- so the second caller fails fast with a clear 409 rather than sitting in
+    the inference queue for minutes to produce redundant rows. The lock is transaction-scoped, so
+    it is released on commit or rollback and cannot be leaked by a crashed request.
+
+    hashtext() is 32-bit, so two different track ids could in principle collide and one would get
+    a spurious "already running". That fails closed (a refused duplicate, never corruption) and is
+    vastly less likely than the duplicate-run bug it prevents.
+    """
+    return bool(
+        session.execute(
+            text("SELECT pg_try_advisory_xact_lock(:ns, hashtext(:tid))"),
+            {"ns": PIPELINE_LOCK_NAMESPACE, "tid": str(track_id)},
+        ).scalar_one()
+    )
+
+
 def db_session_for_tenant(tenant_id: uuid.UUID) -> Session:
     """Open a session and set the RLS tenant context for its transaction.
 

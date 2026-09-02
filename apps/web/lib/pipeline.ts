@@ -6,9 +6,10 @@ export type PipelineStage = "separating" | "transcribing" | "packaging";
  * Runs whichever of separate/transcribe/package a track still needs, based on its real
  * has_stems/has_transcription state (not client-side memory of what already ran this session --
  * that would be lost on a page refresh). Never calls separate() if has_stems is already true:
- * POST /tracks/{id}/separate has no idempotency guard on the backend (a second call writes a
- * second full set of Stem rows, and which set later stages use becomes arbitrary), so retrying
- * a failed chain must always re-check real state, never blindly restart from the top.
+ * The backend now enforces this too -- /separate returns existing stems instead of producing a
+ * second set, and every pipeline stage refuses a concurrent run for the same track with a 409 --
+ * so a duplicate chain wastes a request rather than corrupting data. Skipping finished stages here
+ * is still what keeps a retry cheap and avoids that 409 in the first place.
  *
  * Callers should re-fetch the track's current TrackSummary (via listTracks()) before each retry
  * attempt, rather than reusing a stale snapshot, so a partially-completed chain resumes correctly.
