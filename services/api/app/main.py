@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
@@ -18,6 +19,10 @@ from app.routes.tracks import router as tracks_router
 
 configure_logging()
 _access_logger = logging.getLogger("songbox.access")
+# Deliberately NOT songbox.access. That logger has a strict contract -- exactly one record per
+# request, carrying only the six access fields -- which tests assert on directly. Logging a
+# traceback there would emit a second record and break it.
+_error_logger = logging.getLogger("songbox.error")
 
 app = FastAPI(title="Songbox API")
 app.state.limiter = limiter
@@ -27,21 +32,6 @@ app.state.limiter = limiter
 # argument, so this is safe at runtime; mypy just can't see that from the signature alone).
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
 
-# Dev-only permissive CORS so the Next.js dev server (localhost:3000) can call this API
-# (localhost:8000) cross-origin. Not a production CORS policy -- tighten before any real deploy.
-# allow_credentials=True is required for the browser to send/receive the httpOnly session cookie
-# cross-origin (localhost:3000 -> localhost:8000) -- safe here specifically because allow_origins
-# is a concrete origin, not "*" (the CORS spec forbids combining allow_credentials with a wildcard
-# origin, and browsers enforce this).
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
-    allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type"],
-    allow_credentials=True,
-)
-
-
 @app.middleware("http")
 async def log_requests(
     request: Request, call_next: Callable[[Request], Awaitable[Response]]
@@ -49,7 +39,18 @@ async def log_requests(
     start = time.monotonic()
     status_code = 500
     try:
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        except Exception:
+            # Turn an unhandled error into a real 500 response HERE, inside the middleware stack,
+            # instead of letting it propagate to Starlette's ServerErrorMiddleware. That
+            # middleware sits OUTSIDE every user middleware including CORS, so the 500 it builds
+            # carries no Access-Control-Allow-Origin header -- and a browser discards a
+            # cross-origin response without one, reporting the generic TypeError "Failed to
+            # fetch". The real status and error were invisible in the UI for exactly this reason
+            # while /tracks/upload was 500ing on every full-length song.
+            _error_logger.exception("unhandled error", extra={"path": request.url.path})
+            response = JSONResponse(status_code=500, content={"detail": "internal server error"})
         status_code = response.status_code
         return response
     finally:
@@ -71,6 +72,28 @@ async def log_requests(
             },
         )
 
+
+# Added AFTER log_requests on purpose. Starlette's add_middleware() inserts at position 0, so the
+# LAST-added middleware is the outermost -- CORS must wrap log_requests for the 500 response that
+# middleware now builds to come back out through CORS and pick up its headers.
+#
+# Dev-only permissive CORS so the Next.js dev server (localhost:3000) can call this API
+# (localhost:8000) cross-origin. Not a production CORS policy -- tighten before any real deploy.
+# allow_credentials=True is required for the browser to send/receive the httpOnly session cookie
+# cross-origin (localhost:3000 -> localhost:8000) -- safe here specifically because allow_origins
+# is a concrete origin, not "*" (the CORS spec forbids combining allow_credentials with a wildcard
+# origin, and browsers enforce this).
+#
+# DELETE is in allow_methods because the frontend really issues it (lib/api.ts's deleteTrack).
+# It was missing, so the browser's preflight rejected every delete and the button failed with the
+# same opaque "Failed to fetch" -- while curl, which does not preflight, worked fine.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_methods=["GET", "POST", "DELETE"],
+    allow_headers=["Content-Type"],
+    allow_credentials=True,
+)
 
 app.include_router(auth_router)
 app.include_router(tracks_router)
