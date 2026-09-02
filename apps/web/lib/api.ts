@@ -1,5 +1,31 @@
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
+/**
+ * An error carrying the HTTP status alongside the server's detail message. Callers that need to
+ * treat one status differently -- a 409 "already running" is a reason to wait, not to fail --
+ * branch on `status` rather than string-matching the message, which silently stops working the
+ * moment the wording changes.
+ */
+export class ApiError extends Error {
+  readonly status: number;
+
+  constructor(status: number, detail: string) {
+    super(detail);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
+/** Shared by every response path so all three throw sites carry a status, not just apiFetch's. */
+async function failFromResponse(response: Response): Promise<never> {
+  const body: unknown = await response.json().catch(() => null);
+  const detail =
+    body && typeof body === "object" && "detail" in body && typeof body.detail === "string"
+      ? body.detail
+      : response.statusText;
+  throw new ApiError(response.status, detail);
+}
+
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...init,
@@ -10,12 +36,7 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
     },
   });
   if (!response.ok) {
-    const body: unknown = await response.json().catch(() => null);
-    const detail =
-      body && typeof body === "object" && "detail" in body && typeof body.detail === "string"
-        ? body.detail
-        : response.statusText;
-    throw new Error(detail);
+    await failFromResponse(response);
   }
   return response.json() as Promise<T>;
 }
@@ -149,12 +170,7 @@ export async function uploadTrack(
     body: formData,
   });
   if (!response.ok) {
-    const body: unknown = await response.json().catch(() => null);
-    const detail =
-      body && typeof body === "object" && "detail" in body && typeof body.detail === "string"
-        ? body.detail
-        : response.statusText;
-    throw new Error(detail);
+    await failFromResponse(response);
   }
   return response.json() as Promise<UploadResponse>;
 }
@@ -169,12 +185,7 @@ export async function deleteTrack(trackId: string): Promise<void> {
     credentials: "include",
   });
   if (!response.ok) {
-    const body: unknown = await response.json().catch(() => null);
-    const detail =
-      body && typeof body === "object" && "detail" in body && typeof body.detail === "string"
-        ? body.detail
-        : response.statusText;
-    throw new Error(detail);
+    await failFromResponse(response);
   }
 }
 

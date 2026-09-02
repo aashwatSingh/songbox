@@ -1,4 +1,11 @@
-import { generatePackage, separateTrack, transcribeTrack, type TrackSummary } from "@/lib/api";
+import {
+  ApiError,
+  generatePackage,
+  listTracks,
+  separateTrack,
+  transcribeTrack,
+  type TrackSummary,
+} from "@/lib/api";
 
 export type PipelineStage = "separating" | "transcribing" | "packaging";
 
@@ -21,11 +28,70 @@ export async function runMissingPipelineStages(
   for (const stage of pendingStages(track)) {
     onStageStart(stage);
     if (stage === "separating") {
-      await separateTrack(track.track_id);
+      await runOrWaitForExisting(track.track_id, () => separateTrack(track.track_id), (t) => t.has_stems);
     } else if (stage === "transcribing") {
-      await transcribeTrack(track.track_id);
+      await runOrWaitForExisting(
+        track.track_id,
+        () => transcribeTrack(track.track_id),
+        (t) => t.has_transcription,
+      );
     } else {
-      await generatePackage(track.track_id);
+      await runOrWaitForExisting(track.track_id, () => generatePackage(track.track_id), null);
+    }
+  }
+}
+
+/** How often to re-check whether the job someone else started has finished. */
+const ALREADY_RUNNING_POLL_MS = 4000;
+
+/**
+ * Run one stage; if the backend says a job is already in flight for this track, WAIT for it
+ * instead of failing.
+ *
+ * The per-track advisory lock returns 409 to the second caller by design -- that is what stops
+ * duplicate stem sets. But "another job is already running" is not a failure from the user's point
+ * of view, it is a reason to keep waiting: a second tab, a double-click, or a page refresh
+ * mid-chain would otherwise surface a hard red error while the work was completing perfectly well.
+ *
+ * `isDone` reads the track's real server-side state, so this waits on the OTHER request's actual
+ * progress rather than a timer. Passing null means the stage has no has_* flag to watch (packaging
+ * has none), in which case we wait for the lock to clear and retry the call once.
+ */
+async function runOrWaitForExisting(
+  trackId: string,
+  run: () => Promise<unknown>,
+  isDone: ((track: TrackSummary) => boolean) | null,
+): Promise<void> {
+  try {
+    await run();
+    return;
+  } catch (err) {
+    if (!(err instanceof ApiError) || err.status !== 409 || !err.message.includes("already running")) {
+      throw err;
+    }
+  }
+
+  // Someone else holds the lock. Poll until their job lands, then either accept their result or
+  // -- for a stage with nothing to observe -- retry now that the lock is free.
+  for (;;) {
+    await new Promise((resolve) => setTimeout(resolve, ALREADY_RUNNING_POLL_MS));
+    const current = (await listTracks()).find((t) => t.track_id === trackId);
+    if (!current) {
+      throw new Error("track disappeared while waiting for an in-flight job");
+    }
+    if (isDone === null) {
+      try {
+        await run();
+        return;
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 409 && err.message.includes("already running")) {
+          continue;
+        }
+        throw err;
+      }
+    }
+    if (isDone(current)) {
+      return;
     }
   }
 }

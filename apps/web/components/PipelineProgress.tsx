@@ -20,8 +20,10 @@ import { PIPELINE_STAGE_LABELS, type PipelineStage } from "@/lib/pipeline";
  * Two consequences are handled deliberately rather than hidden:
  *  - The current stage's fill is capped below 100% until the request actually returns, so the bar
  *    can never sit at "done" while work is still running.
- *  - Once elapsed passes the estimate, the copy switches from a countdown to "taking longer than
- *    expected", instead of showing a negative or frozen remaining time.
+ *  - Once elapsed passes the estimate, the copy switches from a countdown to "still working" and
+ *    says the job has not stalled, instead of showing a negative or frozen remaining time. It
+ *    deliberately does NOT say "taking longer than expected": that phrasing made a healthy
+ *    six-minute run look hung when the estimate was calibrated against the wrong model.
  */
 const CURRENT_STAGE_FILL_CAP = 0.92;
 const TICK_MS = 250;
@@ -88,7 +90,7 @@ export function PipelineProgress({
         </p>
         <p className="text-xs text-muted tabular-nums">
           {formatElapsed(elapsedSeconds)}
-          {overrun ? " · taking longer than expected" : ` · ~${formatEstimate(remaining)} left`}
+          {overrun ? " · still working" : ` · ~${formatEstimate(remaining)} left`}
         </p>
       </div>
 
@@ -106,10 +108,21 @@ export function PipelineProgress({
         />
       </div>
 
-      <p className="text-xs text-muted">
-        Estimated {formatEstimate(totalEstimate)} total. First run on a new machine takes up to
-        ~{Math.round(COLD_START_EXTRA_SECONDS)}s longer while model weights download.
-      </p>
+      {overrun ? (
+        // Past the estimate, a countdown is worthless and "taking longer than expected" reads as a
+        // hang -- which is exactly how a healthy six-minute run looked when the estimate was
+        // calibrated to the wrong model. Say what is actually true: the job is still running,
+        // nothing is stuck, and the estimate was the thing that was wrong.
+        <p className="text-xs text-muted">
+          Past the {formatEstimate(totalEstimate)} estimate, but still running &mdash; the job has
+          not stalled. Long tracks and the larger transcription model can take several minutes.
+        </p>
+      ) : (
+        <p className="text-xs text-muted">
+          Estimated {formatEstimate(totalEstimate)} total. First run on a new machine takes up to
+          ~{Math.round(COLD_START_EXTRA_SECONDS)}s longer while model weights download.
+        </p>
+      )}
     </div>
   );
 }
