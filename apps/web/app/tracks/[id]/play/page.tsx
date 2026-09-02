@@ -122,6 +122,11 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
   // an unset 0/1 as a real duration.
   const [durationSeconds, setDurationSeconds] = useState(0);
 
+  // The scrollable lyrics box and a slot per rendered line, so the auto-scroll effect below can
+  // find the active line's real on-screen position without re-deriving it from timing data.
+  const lyricsContainerRef = useRef<HTMLDivElement | null>(null);
+  const lyricLineRefs = useRef<Record<number, HTMLParagraphElement | null>>({});
+
   const playerRef = useRef<StemPlayer | null>(null);
   // Memoizes the in-flight ensurePlayerLoaded() promise (not just the resolved player), so
   // overlapping callers -- e.g. handlePlayPause and handleEnableMicScoring, if a user clicks Play
@@ -550,6 +555,41 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
     [pkg, currentTimeMs]
   );
 
+  // Grouped from the transcription's own word timings -- see lib/lyrics.ts. Rendering every word
+  // into one wrapping container turned a whole song into a solid paragraph; this is what the
+  // scrollable lyrics box below renders line by line.
+  const lyricLines = useMemo(
+    () => (pkg ? groupWordsIntoLines(pkg.karaoke.words) : []),
+    [pkg]
+  );
+  // findActiveWordIndex returns an ARRAY POSITION, while a line's words carry their own `idx`
+  // field. Those happen to coincide today, but resolving the position to the real word makes the
+  // comparison correct by construction rather than by coincidence.
+  const activeWordId = useMemo(
+    () => (pkg ? pkg.karaoke.words[activeWordIndex]?.idx ?? -1 : -1),
+    [pkg, activeWordIndex]
+  );
+  const currentLineIndex = useMemo(
+    () => activeLineIndex(lyricLines, activeWordId),
+    [lyricLines, activeWordId]
+  );
+
+  // Keeps the sung line centered in its box as playback advances -- the Spotify/Apple-Music-style
+  // "swipe up" behavior. Scrolls the BOX ONLY (container.scrollTo), not scrollIntoView, which
+  // would also drag the outer page scroll along with it since the page itself scrolls too.
+  useEffect(() => {
+    if (currentLineIndex < 0) {
+      return;
+    }
+    const container = lyricsContainerRef.current;
+    const activeEl = lyricLineRefs.current[currentLineIndex];
+    if (!container || !activeEl) {
+      return;
+    }
+    const target = activeEl.offsetTop - container.clientHeight / 2 + activeEl.clientHeight / 2;
+    container.scrollTo({ top: Math.max(0, target), behavior: "smooth" });
+  }, [currentLineIndex]);
+
   // Estimated duration derived straight from the package's own data (last pitch frame / last
   // word), used as the fallback before any real audio has been decoded -- fixes the bogus 1ms
   // duration the pitch lane and seek bar used to render against on first paint.
@@ -671,14 +711,8 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
   }
 
   const lyricsWithheld = pkg.karaoke.words.every((w) => w.text === null);
-  // Grouped from the transcription's own word timings -- see lib/lyrics.ts. Rendering every
-  // word into one wrapping container turned a whole song into a solid paragraph.
-  const lyricLines = groupWordsIntoLines(pkg.karaoke.words);
-  // findActiveWordIndex returns an ARRAY POSITION, while the lines carry each word's own `idx`
-  // field. Those happen to coincide today, but resolving the position to the real word makes the
-  // comparison correct by construction rather than by coincidence.
-  const activeWordId = pkg.karaoke.words[activeWordIndex]?.idx ?? -1;
-  const currentLineIndex = activeLineIndex(lyricLines, activeWordId);
+  // lyricLines / activeWordId / currentLineIndex are computed above (before the early return),
+  // since the auto-scroll effect that depends on them is a hook and must run unconditionally.
   const playheadX = (currentTimeMs / durationMs) * 400;
 
   return (
@@ -751,33 +785,51 @@ export default function PlayerPage(props: PageProps<"/tracks/[id]/play">) {
 
         <div className="mt-6">
           {lyricLines.length > 0 && (
-            <div className="mb-6 flex flex-col gap-3">
-              {lyricLines.map((line, lineIdx) => {
-                const isActiveLine = lineIdx === currentLineIndex;
-                return (
-                  <p
-                    key={line.startMs}
-                    className={`flex flex-wrap gap-x-2 leading-relaxed transition-all duration-200 ${
-                      isActiveLine
-                        ? "text-2xl text-foreground"
-                        : "text-lg text-muted/60"
-                    }`}
-                  >
-                    {line.words.map((word) => (
-                      <span
-                        key={word.idx}
-                        className={
-                          word.idx === activeWordId
-                            ? "text-accent font-bold"
-                            : undefined
-                        }
-                      >
-                        {word.text ?? "•"}
-                      </span>
-                    ))}
-                  </p>
-                );
-              })}
+            // Fixed-height, its own scroll -- the box scrolls, never the page. py-40 padding on
+            // the inner column is exactly half the box's h-80 (320px) height, so the FIRST and
+            // LAST lines can still be scrolled to dead center like every line in between; without
+            // it they would hit the box edge instead of reaching the middle.
+            <div
+              ref={lyricsContainerRef}
+              className="relative mb-6 h-80 overflow-y-auto rounded-lg border border-surface-border bg-surface"
+            >
+              <div className="flex flex-col gap-5 px-6 py-40">
+                {lyricLines.map((line, lineIdx) => {
+                  const isActiveLine = lineIdx === currentLineIndex;
+                  // Every word keeps its own highlight (word.idx === activeWordId) regardless of
+                  // which line it's in -- the line grouping is purely visual, word-level tracking
+                  // underneath is unchanged.
+                  const distance =
+                    currentLineIndex < 0 ? null : Math.abs(lineIdx - currentLineIndex);
+                  const lineClass = isActiveLine
+                    ? "text-2xl font-semibold text-foreground"
+                    : distance === 1
+                      ? "text-lg text-muted/70"
+                      : "text-lg text-muted/35";
+                  return (
+                    <p
+                      key={line.startMs}
+                      ref={(el) => {
+                        lyricLineRefs.current[lineIdx] = el;
+                      }}
+                      className={`flex flex-wrap gap-x-2 leading-relaxed transition-all duration-300 ${lineClass}`}
+                    >
+                      {line.words.map((word) => (
+                        <span
+                          key={word.idx}
+                          className={
+                            word.idx === activeWordId
+                              ? "text-accent font-bold"
+                              : undefined
+                          }
+                        >
+                          {word.text ?? "•"}
+                        </span>
+                      ))}
+                    </p>
+                  );
+                })}
+              </div>
             </div>
           )}
 
