@@ -122,7 +122,7 @@ describe("the upload control", () => {
     await renderPage();
     fireEvent.click(screen.getByRole("button", { name: /upload track/i }));
 
-    const zone = screen.getByText(/choose a file/i).closest("button");
+    const zone = screen.getByText(/choose files/i).closest("button");
     expect(zone).not.toBeNull();
     fireEvent.drop(zone as HTMLElement, {
       dataTransfer: { files: [new File(["audio"], "Dropped.wav", { type: "audio/wav" })] },
@@ -143,5 +143,76 @@ describe("the upload control", () => {
     });
 
     await waitFor(() => expect(submit.disabled).toBe(false));
+  });
+});
+
+describe("multi-file upload", () => {
+  test("accepts several files and reports the count", async () => {
+    await renderPage();
+    fireEvent.click(screen.getByRole("button", { name: /upload track/i }));
+
+    fireEvent.change(fileInput(), {
+      target: {
+        files: [
+          new File(["a"], "One.wav", { type: "audio/wav" }),
+          new File(["b"], "Two.wav", { type: "audio/wav" }),
+          new File(["c"], "Three.wav", { type: "audio/wav" }),
+        ],
+      },
+    });
+
+    await waitFor(() => expect(screen.getByText("3 files selected")).toBeTruthy());
+    // The submit button names the batch, so it is obvious more than one song is going up.
+    expect(screen.getByRole("button", { name: /upload 3 songs/i })).toBeTruthy();
+  });
+
+  test("a batch titles each song from its own filename instead of the shared Title box", async () => {
+    await renderPage();
+    fireEvent.click(screen.getByRole("button", { name: /upload track/i }));
+
+    fireEvent.change(fileInput(), {
+      target: {
+        files: [
+          new File(["a"], "One.wav", { type: "audio/wav" }),
+          new File(["b"], "Two.wav", { type: "audio/wav" }),
+        ],
+      },
+    });
+
+    // A single Title field cannot name two songs, so it is replaced by an explanation.
+    await waitFor(() =>
+      expect(screen.getByText(/each is titled from its filename/i)).toBeTruthy(),
+    );
+    expect(screen.queryByPlaceholderText("Track title")).toBeNull();
+  });
+
+  test("a single file still uses the Title box", async () => {
+    await renderPage();
+    fireEvent.click(screen.getByRole("button", { name: /upload track/i }));
+
+    fireEvent.change(fileInput(), {
+      target: { files: [new File(["a"], "Only One.wav", { type: "audio/wav" })] },
+    });
+
+    await waitFor(() => expect(screen.getByText("Only One.wav")).toBeTruthy());
+    const title = screen.getByPlaceholderText("Track title") as HTMLInputElement;
+    expect(title.value).toBe("Only One");
+  });
+
+  test("accepts multiple files dropped at once", async () => {
+    await renderPage();
+    fireEvent.click(screen.getByRole("button", { name: /upload track/i }));
+
+    const zone = screen.getByText(/choose files/i).closest("button");
+    fireEvent.drop(zone as HTMLElement, {
+      dataTransfer: {
+        files: [
+          new File(["a"], "D1.wav", { type: "audio/wav" }),
+          new File(["b"], "D2.wav", { type: "audio/wav" }),
+        ],
+      },
+    });
+
+    await waitFor(() => expect(screen.getByText("2 files selected")).toBeTruthy());
   });
 });
