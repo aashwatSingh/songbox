@@ -190,7 +190,10 @@ def run_separate(audio_bytes: bytes, model_name: str) -> dict[str, bytes]:
     max_containers=_MAX_CONTAINERS,
 )
 def run_transcribe(
-    audio_bytes: bytes, model_size: str, initial_prompt: str | None = None
+    audio_bytes: bytes,
+    model_size: str,
+    initial_prompt: str | None = None,
+    language: str | None = None,
 ) -> TranscriptionResult:
     from pathlib import Path
     from tempfile import NamedTemporaryFile
@@ -203,7 +206,10 @@ def run_transcribe(
         tmp.flush()
         tmp.close()
         return run_transcription_and_alignment(
-            Path(tmp.name), model_size=model_size, initial_prompt=initial_prompt
+            Path(tmp.name),
+            model_size=model_size,
+            initial_prompt=initial_prompt,
+            language=language,
         )
     finally:
         Path(tmp.name).unlink(missing_ok=True)

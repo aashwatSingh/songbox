@@ -12,7 +12,12 @@ import {
   type TrackSummary,
 } from "@/lib/api";
 import { useAuth } from "@/lib/AuthContext";
-import { pendingStages, runMissingPipelineStages, type PipelineStage } from "@/lib/pipeline";
+import {
+  pendingStages,
+  runMissingPipelineStages,
+  TRANSCRIPTION_LANGUAGES,
+  type PipelineStage,
+} from "@/lib/pipeline";
 import { PipelineProgress } from "@/components/PipelineProgress";
 
 function MusicNoteIcon() {
@@ -94,6 +99,10 @@ export default function TracksPage() {
   const [uploadFiles, setUploadFiles] = useState<File[]>([]);
   const [uploadTitle, setUploadTitle] = useState("");
   const [uploadArtist, setUploadArtist] = useState("");
+  // "" = let Whisper auto-detect (the default and the historical behavior). Setting it pins
+  // decoding to that language, which is what makes a non-English song transcribe correctly:
+  // auto-detection is the step that fails, not decoding.
+  const [uploadLanguage, setUploadLanguage] = useState("");
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [busyTrackId, setBusyTrackId] = useState<string | null>(null);
@@ -202,6 +211,11 @@ export default function TracksPage() {
       return;
     }
     const files = uploadFiles;
+    // Captured before the form resets below, alongside `files`, so the value that reaches the
+    // pipeline is the one that was selected for THIS upload. Deliberately not cleared afterwards:
+    // someone uploading a Hindi album uploads several, and re-picking the language every time
+    // would be the annoying half of "remembered settings".
+    const language = uploadLanguage;
     setUploadError(null);
     setUploading(true);
     setBatchFailures([]);
@@ -249,7 +263,7 @@ export default function TracksPage() {
     }
 
     if (uploaded.length > 0) {
-      await runPipelineForMany(uploaded, failures);
+      await runPipelineForMany(uploaded, failures, language);
     } else {
       setBatchTotal(0);
       setBatchLabel(null);
@@ -267,7 +281,8 @@ export default function TracksPage() {
    */
   const runPipelineForMany = async (
     targets: { id: string; label: string }[],
-    priorFailures: string[] = []
+    priorFailures: string[] = [],
+    language?: string
   ) => {
     const failures = [...priorFailures];
     setBatchTotal(targets.length);
@@ -288,7 +303,7 @@ export default function TracksPage() {
         setProcessingStages(pendingStages(track));
         setProcessingDuration(track.duration_seconds);
         setProcessingStartedAt(Date.now());
-        await runMissingPipelineStages(track, setProcessingStage);
+        await runMissingPipelineStages(track, setProcessingStage, language);
       } catch (err) {
         failures.push(
           `${target.label}: ${err instanceof Error ? err.message : "processing failed"}`
@@ -566,6 +581,26 @@ export default function TracksPage() {
                 placeholder="Artist name"
                 className="rounded border border-surface-border bg-background px-3 py-2 text-sm"
               />
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-sm font-medium">
+                Language{uploadFiles.length > 1 && " (applied to all)"}
+              </span>
+              <select
+                value={uploadLanguage}
+                onChange={(e) => setUploadLanguage(e.target.value)}
+                className="rounded border border-surface-border bg-background px-3 py-2 text-sm"
+              >
+                {TRANSCRIPTION_LANGUAGES.map(([code, label]) => (
+                  <option key={code} value={code}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+              <span className="text-xs text-muted">
+                Auto-detect works well for English. For other languages it can guess wrong and
+                garble the whole transcript &mdash; picking the language here avoids that.
+              </span>
             </label>
             <div className="flex flex-col gap-1">
               <span className="text-sm font-medium">Audio files</span>

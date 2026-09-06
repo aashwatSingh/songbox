@@ -1,6 +1,6 @@
 # Status
 
-Last updated: 2026-08-31.
+Last updated: 2026-09-03.
 
 ## Done — M8 complete
 
@@ -1498,6 +1498,85 @@ that module needs -- fixed by installing `.[dev,modal]` in CI.
   above) is visible. Confirmed this is pre-existing auth-redirect behavior, not something this
   round of fixes touched; a real fix would mean `AuthContext` distinguishing "network/server
   unreachable" from "genuinely logged out," which is a separate concern from this bug report.
+
+## Done — post-M8: non-English transcription, a model-load hang, and remote access hardening
+
+Started from "make it transcribe Hindi and Spanish too". Investigation found the pipeline was
+already multilingual in principle -- no `.en`-only checkpoint, no forced `language=`, and an
+existing `whisper_native` fallback for non-English -- so the interesting question was whether it
+actually worked. It did not, for a reason worth recording.
+
+**Measured, not assumed.** Synthesized speech (eSpeak-NG, offline, no third-party audio fetched)
+in three languages, run through the real pipeline:
+
+| Clip | Auto-detect | Outcome |
+| --- | --- | --- |
+| English (control) | `en` p=0.97 | exact transcript |
+| Hindi | `hu` (Hungarian) p=0.62 | garbled |
+| Spanish | `la` (Latin) p=0.85 | garbled |
+| Hindi, pinned `hi` | `hi` p=1.00 | first sentence exact, rest close |
+| Spanish, pinned `es` | `es` p=1.00 | character-for-character exact |
+
+The English control is what makes this conclusive: Whisper handles this audio fine, so "the test
+audio was unintelligible" is ruled out. **Language *detection* is the failure, not decoding.**
+Whisper identifies language from a short leading window; guess wrong and every subsequent token
+decodes in the wrong language. `vad_filter` on/off made no difference.
+
+Caveat kept explicit: eSpeak's synthetic Hindi/Spanish is not singing, and sung vocals distort
+exactly the prosodic cues language ID depends on. So this establishes the *mechanism* and that
+pinning fixes it; it does not measure how often auto-detect fails on real recordings.
+`TODO: unmeasured` — detection accuracy on genuine non-English songs.
+
+**What shipped:**
+- `language` threaded through the whole transcription path: `TranscribeRequest` ->
+  `run_transcribe()` -> `run_transcription_and_alignment()` -> `transcribe_audio()` ->
+  `model.transcribe(language=...)`, and through the Modal backend too so it cannot silently ignore
+  the setting. `None` means auto-detect, which is faster-whisper's own default, so every existing
+  caller is unaffected.
+- A **Language picker on the upload form** (default "Auto-detect"), 26 curated options, each code
+  checked against faster-whisper's own tokenizer list. The API deliberately accepts any code
+  Whisper knows rather than validating against a hand-maintained copy that would drift.
+- The English/non-English aligner branch needed no special-casing: pinning `en` still routes to
+  wav2vec2, pinning anything else to `whisper_native`. Verified end to end.
+
+**A real latent bug, found while debugging the above:** `_load_whisper_model()` hung for **48
+minutes** on an already-cached model. `WhisperModel()` re-resolves its snapshot against
+HuggingFace Hub on every construction, with no read timeout; the socket went to `CLOSE_WAIT`
+(remote sent FIN, client kept waiting) and the process sat at 0% CPU and 0% GPU. Diagnosed by
+sampling CPU/GPU, then `Get-NetTCPConnection`, then a `py-spy` stack dump landing in
+`detect_language -> encode`. Because the function is `lru_cache`d this hits the first transcription
+after every process start -- and `--reload` makes restarts frequent. Symptom: a pipeline that hangs
+forever with no error and nothing logged, i.e. indistinguishable from "generation is stuck".
+Fixed with `local_files_only=True` and a networked fallback so first-run downloads still work.
+Same three transcriptions afterwards: **53.9s total, no network call.**
+
+**Remote-access hardening** (from a code review of the uncommitted Tailscale work):
+- `scripts/start-api.ps1` binds `$env:SONGBOX_BIND_HOST`, default `127.0.0.1`, instead of
+  `0.0.0.0`. With `0.0.0.0` the security boundary was a Windows Firewall *network-profile*
+  classification that no code asserts -- profiles are per-network, so joining any network Windows
+  considers Private would have opened ports 3000/8000 to that LAN, behind which sit unauthenticated
+  signup and (in personal mode) an unenforced rights gate. Binding one address makes the kernel
+  refuse those connections outright. The script now also **refuses to start** on
+  `SONGBOX_PERSONAL_MODE` + `0.0.0.0` together.
+- `SONGBOX_EXTRA_CORS_ORIGINS` parsing extracted to `_parse_extra_origins()`, which lowercases
+  (CORSMiddleware compares by exact string equality; browsers send lowercase) and **rejects `*` at
+  startup**. Starlette does not degrade `*` to a safe wildcard: combined with
+  `allow_credentials=True` it echoes each requesting origin back as allowed, which would hand every
+  origin on the internet a credentialed handle on the API.
+- Stale `.next/server` and `.next/static` builds deleted -- they still carried the demo
+  auto-login credentials inlined at build time, so a `next start` against them would have silently
+  signed in anyone who reached port 3000. `.next/dev` was already clean.
+- Documented in `.env.example`: the frontend and API must use the **same host form** (both the
+  100.x IP or both MagicDNS). Mixing them passes CORS but silently withholds the `SameSite=lax`
+  session cookie, so every authenticated request 401s while CORS looks fine -- it reads as "login
+  is broken", not "two env vars disagree".
+
+**Known gaps, deliberately not closed here:**
+- The manual lyric-correction editor remains English-only (wav2vec2 has no multilingual model
+  here) and says so in the UI. Non-English tracks transcribe and play; they just cannot be
+  hand-corrected and re-aligned.
+- Language is chosen per upload and not stored on the track, so re-transcribing an existing track
+  later goes back to auto-detect.
 
 ## In flight
 

@@ -570,6 +570,13 @@ class WordInfo(BaseModel):
 
 class TranscribeRequest(BaseModel):
     model_size: str = DEFAULT_WHISPER_MODEL_SIZE
+    # None = let Whisper auto-detect, which is the historical behavior and stays the default.
+    # Deliberately not validated against a hardcoded list of codes here: faster-whisper's own set
+    # lives in a private symbol (tokenizer._LANGUAGE_CODES), and a hand-maintained copy would
+    # eventually reject a language the model handles perfectly well. An unknown code raises inside
+    # Whisper and already surfaces as a 422 with its message, which is the same outcome a local
+    # check would produce, minus the drift.
+    language: str | None = None
 
 
 class TranscribeResponse(BaseModel):
@@ -615,6 +622,7 @@ def transcribe_track(
     db: Session = Depends(get_db),
 ) -> TranscribeResponse:
     model_size = body.model_size if body is not None else DEFAULT_WHISPER_MODEL_SIZE
+    language = body.language if body is not None else None
     if model_size not in ALLOWED_WHISPER_MODEL_SIZES:
         raise HTTPException(
             status_code=422,
@@ -669,6 +677,7 @@ def transcribe_track(
                 model_size=model_size,
                 timeout_seconds=TRANSCRIPTION_TIMEOUT_SECONDS,
                 initial_prompt=initial_prompt,
+                language=language,
                 run_transcription_and_alignment_fn=run_transcription_and_alignment,
             )
         except BackendBusyError as exc:

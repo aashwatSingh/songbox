@@ -24,7 +24,23 @@ ENGLISH_LANGUAGE_CODE = "en"
 # the right trade for a single-user local install and would want revisiting for a multi-tenant one.
 @lru_cache(maxsize=2)
 def _load_whisper_model(model_size: str, device: str, compute_type: str) -> WhisperModel:
-    return WhisperModel(model_size, device=device, compute_type=compute_type)
+    # local_files_only=True first, deliberately. WhisperModel() otherwise contacts HuggingFace Hub
+    # to re-resolve the snapshot on EVERY construction, even when every file is already cached --
+    # and that call has no read timeout. Observed here for real: the connection went to CLOSE_WAIT
+    # (remote sent FIN, the client kept waiting for a body that never came) and the process sat
+    # blocked for 48 minutes at 0% CPU and 0% GPU against a model already sitting complete on disk.
+    # Because this function is lru_cached, that hits the first transcription after every process
+    # start -- and with --reload, restarts are frequent. The user-visible symptom is a pipeline
+    # that hangs forever with no error and nothing in the logs.
+    #
+    # Falling back to a networked load keeps first-run downloads working: cached is the fast,
+    # offline, no-network path; uncached still fetches exactly once.
+    try:
+        return WhisperModel(
+            model_size, device=device, compute_type=compute_type, local_files_only=True
+        )
+    except Exception:
+        return WhisperModel(model_size, device=device, compute_type=compute_type)
 
 
 @lru_cache(maxsize=1)
@@ -88,11 +104,23 @@ def transcribe_audio(
     path: Path,
     model_size: str = DEFAULT_WHISPER_MODEL_SIZE,
     initial_prompt: str | None = None,
+    language: str | None = None,
 ) -> Transcript:
     """Transcribe `path` with faster-whisper, requesting word-level timestamps directly from
     Whisper. Used as-is for non-English tracks (the "whisper_native" aligner path) and as the
     source text for English tracks, which then get forced-aligned by align_words() for tighter
-    timing precision."""
+    timing precision.
+
+    `language` is an ISO code (e.g. "hi", "es") that pins decoding to that language; None keeps
+    Whisper's own auto-detection. Pinning it matters more than it looks: measured on this project,
+    auto-detection is the weak link, not decoding. Synthesized Hindi was detected as Hungarian
+    (p=0.62) and Spanish as Latin (p=0.85), and each then decoded into garbage -- while the SAME
+    audio with the language pinned came back correct (Spanish character-for-character exact, Hindi
+    with its first sentence exact). An English control transcribed perfectly either way, which is
+    what rules out "the test audio was simply unintelligible". Whisper identifies language from a
+    short leading window, and sung vocals distort exactly the cues it relies on, so a real song in
+    a non-English language is a plausible candidate for the same wrong turn.
+    """
     device = "cuda" if torch.cuda.is_available() else "cpu"
     # int8_float32 rather than plain int8 on CPU: weights stay quantized (so memory and speed are
     # close to int8) but accumulation happens in float32, which measurably reduces the garbled
@@ -126,6 +154,9 @@ def transcribe_audio(
             # title never corrupts an otherwise-correct transcript, only a genuinely ambiguous
             # word gets nudged toward the hint.
             initial_prompt=initial_prompt,
+            # None means "auto-detect", which is faster-whisper's own default -- so passing this
+            # through unset changes nothing for every existing track.
+            language=language,
         )
         segment_list = list(segments)
     except Exception as exc:
@@ -285,13 +316,23 @@ def _unflatten[T](items: list[T], lengths: list[int]) -> list[list[T]]:
 
 
 def run_transcription_and_alignment(
-    path: Path, model_size: str, initial_prompt: str | None = None
+    path: Path,
+    model_size: str,
+    initial_prompt: str | None = None,
+    language: str | None = None,
 ) -> TranscriptionResult:
     """Orchestrates the full stage: transcribe, then align English tracks against their own
     transcript for tighter word-onset precision; non-English tracks keep Whisper's own word
     timings, since the alignment model here only covers English (see the design spec's
-    licensing-blocked-multilingual-aligner scope decision)."""
-    transcript = transcribe_audio(path, model_size=model_size, initial_prompt=initial_prompt)
+    licensing-blocked-multilingual-aligner scope decision).
+
+    `language` pins decoding rather than auto-detecting (see transcribe_audio's docstring). The
+    English/non-English branch below reads the language off the resulting transcript either way,
+    so pinning "en" still routes to wav2vec2 and pinning anything else still routes to Whisper's
+    native timings -- no special-casing needed here."""
+    transcript = transcribe_audio(
+        path, model_size=model_size, initial_prompt=initial_prompt, language=language
+    )
     if not transcript.words:
         # No speech detected at all -- aligning empty text is meaningless (align_words() would
         # just raise AlignmentError on it), and there is trivially nothing for wav2vec2 to have

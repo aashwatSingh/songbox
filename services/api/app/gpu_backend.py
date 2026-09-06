@@ -171,6 +171,7 @@ def run_transcribe(
     model_size: str,
     timeout_seconds: float,
     initial_prompt: str | None = None,
+    language: str | None = None,
     run_transcription_and_alignment_fn: Callable[..., TranscriptionResult] | None = None,
 ) -> TranscriptionResult:
     """See run_separate()'s docstring for why `run_transcription_and_alignment_fn` exists --
@@ -184,7 +185,7 @@ def run_transcribe(
     otherwise-correct transcript."""
     if _active_backend() == "modal":
         return _run_transcribe_modal(
-            audio_bytes, model_size=model_size, initial_prompt=initial_prompt
+            audio_bytes, model_size=model_size, initial_prompt=initial_prompt, language=language
         )
 
     if run_transcription_and_alignment_fn is not None:
@@ -200,7 +201,12 @@ def run_transcribe(
         tmp.flush()
         tmp.close()
         result: TranscriptionResult = _run_local(
-            lambda: fn(Path(tmp.name), model_size=model_size, initial_prompt=initial_prompt),
+            lambda: fn(
+                Path(tmp.name),
+                model_size=model_size,
+                initial_prompt=initial_prompt,
+                language=language,
+            ),
             timeout_seconds=timeout_seconds,
         )
         return result
@@ -209,14 +215,20 @@ def run_transcribe(
 
 
 def _run_transcribe_modal(
-    audio_bytes: bytes, *, model_size: str, initial_prompt: str | None = None
+    audio_bytes: bytes,
+    *,
+    model_size: str,
+    initial_prompt: str | None = None,
+    language: str | None = None,
 ) -> TranscriptionResult:
     import modal
     import modal.exception
 
     fn = modal.Function.from_name("songbox-gpu", "run_transcribe")
     try:
-        return fn.remote(audio_bytes, model_size, initial_prompt)  # type: ignore[no-any-return]
+        return fn.remote(  # type: ignore[no-any-return]
+            audio_bytes, model_size, initial_prompt, language
+        )
     except modal.exception.FunctionTimeoutError as exc:
         raise BackendTimeoutError(str(exc)) from exc
 

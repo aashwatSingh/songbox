@@ -13,7 +13,7 @@ vi.mock("@/lib/api", async () => {
     ...actual,
     listTracks: () => listTracks(),
     separateTrack: (trackId: string) => separateTrack(trackId),
-    transcribeTrack: (trackId: string) => transcribeTrack(trackId),
+    transcribeTrack: (trackId: string, language?: string) => transcribeTrack(trackId, language),
     generatePackage: (trackId: string) => generatePackage(trackId),
   };
 });
@@ -133,5 +133,27 @@ describe("runMissingPipelineStages against a 409 from a concurrent run", () => {
     await vi.advanceTimersByTimeAsync(4000);
 
     await expect(promise).rejects.toThrow(/disappeared/);
+  });
+});
+
+describe("language pass-through", () => {
+  // Measured on this project: Whisper's language auto-detection is what fails on non-English
+  // audio, not decoding -- Hindi was detected as Hungarian and Spanish as Latin, and both then
+  // decoded into garbage, while the same audio with the language pinned transcribed correctly.
+  // The picker on the upload form is only worth anything if the value actually reaches the API.
+  test("forwards the chosen language to the transcribe call", async () => {
+    const t = track({ has_stems: true });
+
+    await runMissingPipelineStages(t, () => {}, "hi");
+
+    expect(transcribeTrack).toHaveBeenCalledWith("t1", "hi");
+  });
+
+  test("sends undefined when no language is chosen, preserving auto-detect", async () => {
+    const t = track({ has_stems: true });
+
+    await runMissingPipelineStages(t, () => {});
+
+    expect(transcribeTrack).toHaveBeenCalledWith("t1", undefined);
   });
 });

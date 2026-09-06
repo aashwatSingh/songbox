@@ -20,10 +20,14 @@ export type PipelineStage = "separating" | "transcribing" | "packaging";
  *
  * Callers should re-fetch the track's current TrackSummary (via listTracks()) before each retry
  * attempt, rather than reusing a stale snapshot, so a partially-completed chain resumes correctly.
+ *
+ * `language` pins Whisper to a specific language for the transcribe stage; omit it for
+ * auto-detection (the default). See transcribeTrack()'s comment for why pinning is worth offering.
  */
 export async function runMissingPipelineStages(
   track: Pick<TrackSummary, "track_id" | "has_stems" | "has_transcription">,
   onStageStart: (stage: PipelineStage) => void,
+  language?: string,
 ): Promise<void> {
   for (const stage of pendingStages(track)) {
     onStageStart(stage);
@@ -32,7 +36,7 @@ export async function runMissingPipelineStages(
     } else if (stage === "transcribing") {
       await runOrWaitForExisting(
         track.track_id,
-        () => transcribeTrack(track.track_id),
+        () => transcribeTrack(track.track_id, language),
         (t) => t.has_transcription,
       );
     } else {
@@ -115,6 +119,43 @@ export function pendingStages(
   stages.push("packaging");
   return stages;
 }
+
+/**
+ * Languages offered in the upload form's picker, as [ISO code, label]. "" means auto-detect.
+ *
+ * A curated subset of the 100 languages Whisper supports, not the full list -- a 100-entry
+ * dropdown is worse to use than a short one, and every code here was checked against
+ * faster-whisper's own tokenizer list. The API itself accepts ANY code Whisper knows (see
+ * TranscribeRequest.language), so this list constrains only the picker, never the backend.
+ */
+export const TRANSCRIPTION_LANGUAGES: readonly (readonly [string, string])[] = [
+  ["", "Auto-detect"],
+  ["en", "English"],
+  ["es", "Spanish"],
+  ["hi", "Hindi"],
+  ["pa", "Punjabi"],
+  ["ur", "Urdu"],
+  ["bn", "Bengali"],
+  ["ta", "Tamil"],
+  ["te", "Telugu"],
+  ["mr", "Marathi"],
+  ["gu", "Gujarati"],
+  ["fr", "French"],
+  ["de", "German"],
+  ["pt", "Portuguese"],
+  ["it", "Italian"],
+  ["nl", "Dutch"],
+  ["ru", "Russian"],
+  ["ar", "Arabic"],
+  ["tr", "Turkish"],
+  ["pl", "Polish"],
+  ["ja", "Japanese"],
+  ["ko", "Korean"],
+  ["zh", "Chinese"],
+  ["vi", "Vietnamese"],
+  ["th", "Thai"],
+  ["id", "Indonesian"],
+];
 
 export const PIPELINE_STAGE_LABELS: Record<PipelineStage, string> = {
   separating: "Separating stems…",

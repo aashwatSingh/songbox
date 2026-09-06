@@ -198,8 +198,19 @@ export function separateTrack(trackId: string): Promise<{ track_id: string; stem
   return apiFetch(`/tracks/${trackId}/separate`, { method: "POST" });
 }
 
-export function transcribeTrack(trackId: string): Promise<TranscriptionResponse> {
-  return apiFetch<TranscriptionResponse>(`/tracks/${trackId}/transcribe`, { method: "POST" });
+// `language` is an ISO code ("hi", "es", ...) that pins Whisper to that language; omit it (or pass
+// "") to keep auto-detection, which stays the default. Worth pinning when you know the language:
+// measured on this project, auto-detection is the part that fails, not decoding -- Hindi audio was
+// detected as Hungarian and Spanish as Latin, and both then decoded into garbage, while the same
+// audio with the language pinned transcribed correctly.
+export function transcribeTrack(
+  trackId: string,
+  language?: string,
+): Promise<TranscriptionResponse> {
+  return apiFetch<TranscriptionResponse>(`/tracks/${trackId}/transcribe`, {
+    method: "POST",
+    body: JSON.stringify(language ? { language } : {}),
+  });
 }
 
 export function getTranscription(trackId: string): Promise<TranscriptionResponse> {

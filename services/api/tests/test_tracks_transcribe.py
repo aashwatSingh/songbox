@@ -285,3 +285,49 @@ def test_transcribe_omits_the_prompt_when_the_track_has_no_title_or_artist(
 
     assert response.status_code == 200
     assert received.get("initial_prompt") is None
+
+
+def test_transcribe_pins_the_requested_language(
+    monkeypatch: pytest.MonkeyPatch, synthetic_wav: Path, authed_client: AuthedClient
+) -> None:
+    """Measured on this project: Whisper's language auto-detection is the step that fails on
+    non-English audio, not decoding -- Hindi was detected as Hungarian and Spanish as Latin, and
+    each then decoded into garbage, while the same audio with the language pinned came back
+    correct. That fix is only real if the code the caller picks actually reaches Whisper."""
+    client = authed_client.client
+    received: dict[str, object] = {}
+
+    def _capture(*args: object, **kwargs: object) -> TranscriptionResult:
+        received.update(kwargs)
+        return TranscriptionResult(text="", language="hi", aligner="whisper_native", words=[])
+
+    monkeypatch.setattr("app.routes.tracks.run_transcription_and_alignment", _capture)
+    track_id = _upload_pass_and_separate_track(client, synthetic_wav)
+
+    response = client.post(f"/tracks/{track_id}/transcribe", json={"language": "hi"})
+
+    assert response.status_code == 200
+    assert received.get("language") == "hi"
+
+
+def test_transcribe_defaults_to_auto_detection(
+    monkeypatch: pytest.MonkeyPatch, synthetic_wav: Path, authed_client: AuthedClient
+) -> None:
+    """Omitting the language must send None (Whisper's own "auto-detect"), not an empty string --
+    "" is not a valid language code and would make Whisper raise instead of auto-detecting. This
+    is what keeps every pre-existing caller's behavior unchanged."""
+    client = authed_client.client
+    received: dict[str, object] = {}
+
+    def _capture(*args: object, **kwargs: object) -> TranscriptionResult:
+        received.update(kwargs)
+        return TranscriptionResult(text="", language="en", aligner="wav2vec2", words=[])
+
+    monkeypatch.setattr("app.routes.tracks.run_transcription_and_alignment", _capture)
+    track_id = _upload_pass_and_separate_track(client, synthetic_wav)
+
+    response = client.post(f"/tracks/{track_id}/transcribe")
+
+    assert response.status_code == 200
+    assert "language" in received
+    assert received["language"] is None
