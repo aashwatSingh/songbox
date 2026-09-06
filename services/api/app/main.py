@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from collections.abc import Awaitable, Callable
 
@@ -73,23 +74,54 @@ async def log_requests(
         )
 
 
+_EXTRA_CORS_ORIGINS_ENV = os.environ.get("SONGBOX_EXTRA_CORS_ORIGINS", "")
+
+
+def _parse_extra_origins(raw: str) -> list[str]:
+    """Parse SONGBOX_EXTRA_CORS_ORIGINS (comma-separated) into concrete allowed origins.
+
+    Lowercased because CORSMiddleware matches the browser's Origin header against this list by
+    exact string equality, and browsers send scheme and host already lowercased -- a hand-typed
+    "http://MyPC.tail1234.ts.net:3000" would otherwise silently never match. Origins carry no
+    path, so lowercasing the whole value is safe.
+
+    Blank entries are dropped so a trailing comma doesn't add "" to the list. That is hygiene, not
+    a security fix: a request with no Origin header returns before allow_origins is consulted at
+    all (starlette/middleware/cors.py's `if origin is None` early return), so a stray "" could
+    only ever match a literal empty Origin header, which browsers do not send.
+    """
+    origins = [origin.strip().lower() for origin in raw.split(",") if origin.strip()]
+    # Refuse "*" outright rather than passing it through, because Starlette does NOT degrade it to
+    # a safe wildcard here: any "*" in allow_origins sets allow_all_origins, and combined with
+    # allow_credentials=True its send() echoes each requesting origin back alongside
+    # Access-Control-Allow-Credentials: true -- handing every origin on the internet a credentialed
+    # handle on this API. Typing "*" is also the first thing anyone tries when CORS breaks, so this
+    # fails loudly at startup instead of silently becoming universally open.
+    if "*" in origins:
+        raise RuntimeError(
+            "SONGBOX_EXTRA_CORS_ORIGINS must list concrete origins, never '*' -- combined with "
+            "allow_credentials=True that grants every origin credentialed access to this API."
+        )
+    return origins
+
+
 # Added AFTER log_requests on purpose. Starlette's add_middleware() inserts at position 0, so the
 # LAST-added middleware is the outermost -- CORS must wrap log_requests for the 500 response that
 # middleware now builds to come back out through CORS and pick up its headers.
 #
-# Dev-only permissive CORS so the Next.js dev server (localhost:3000) can call this API
-# (localhost:8000) cross-origin. Not a production CORS policy -- tighten before any real deploy.
-# allow_credentials=True is required for the browser to send/receive the httpOnly session cookie
-# cross-origin (localhost:3000 -> localhost:8000) -- safe here specifically because allow_origins
-# is a concrete origin, not "*" (the CORS spec forbids combining allow_credentials with a wildcard
-# origin, and browsers enforce this).
+# localhost:3000 always works for local dev. SONGBOX_EXTRA_CORS_ORIGINS adds more without a code
+# change -- e.g. a Tailscale address, so the same PC can be reached from a phone on your private
+# tailnet. allow_credentials=True is required for the browser to send/receive the httpOnly session
+# cookie cross-origin -- safe here specifically because _parse_extra_origins() guarantees
+# allow_origins is a list of concrete origins and never "*" (see its docstring for why that
+# guarantee has to be enforced in code rather than merely documented).
 #
 # DELETE is in allow_methods because the frontend really issues it (lib/api.ts's deleteTrack).
 # It was missing, so the browser's preflight rejected every delete and the button failed with the
 # same opaque "Failed to fetch" -- while curl, which does not preflight, worked fine.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["http://localhost:3000", *_parse_extra_origins(_EXTRA_CORS_ORIGINS_ENV)],
     allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["Content-Type"],
     allow_credentials=True,

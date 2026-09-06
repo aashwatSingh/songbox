@@ -55,7 +55,9 @@ if (-not $env:ACOUSTID_API_KEY) {
 # Say it out loud on every start. A gate that silently stopped enforcing is far worse than one
 # that is noisy about it, and this is exactly the kind of setting that gets turned on for a
 # local experiment and then forgotten about on a machine that later serves someone else.
-if ($env:SONGBOX_PERSONAL_MODE -and $env:SONGBOX_PERSONAL_MODE -notin @("0", "false", "no", "off")) {
+$personalMode = $env:SONGBOX_PERSONAL_MODE -and `
+    $env:SONGBOX_PERSONAL_MODE -notin @("0", "false", "no", "off")
+if ($personalMode) {
     Write-Host ""
     Write-Host "SONGBOX_PERSONAL_MODE is ON -- the rights gate is NOT enforcing." -ForegroundColor Yellow
     Write-Host "  Every upload passes regardless of what the fingerprint check finds." -ForegroundColor Yellow
@@ -64,9 +66,41 @@ if ($env:SONGBOX_PERSONAL_MODE -and $env:SONGBOX_PERSONAL_MODE -notin @("0", "fa
     Write-Host ""
 }
 
+# See the bind-address comment further down for the full reasoning. Checked here, next to the
+# personal-mode warning, because the two settings are only dangerous *together*: an unenforced
+# rights gate behind a loopback-only socket serves exactly one machine, which is the documented
+# single-user case. The same gate behind a wide-open socket is the "serving more than one person"
+# state CLAUDE.md forbids, and 0.0.0.0 makes that true of every interface at once.
+$bindHost = if ($env:SONGBOX_BIND_HOST) { $env:SONGBOX_BIND_HOST } else { "127.0.0.1" }
+if ($personalMode -and $bindHost -eq "0.0.0.0") {
+    Write-Host ""
+    Write-Host "REFUSING TO START: SONGBOX_BIND_HOST=0.0.0.0 with the rights gate unenforced." -ForegroundColor Red
+    Write-Host "  0.0.0.0 listens on every interface, so the only thing keeping this off" -ForegroundColor Red
+    Write-Host "  whatever network you are on is a Windows Firewall profile classification" -ForegroundColor Red
+    Write-Host "  that nothing here can verify. Behind it: unauthenticated signup and a gate" -ForegroundColor Red
+    Write-Host "  that passes every upload." -ForegroundColor Red
+    Write-Host "  Set SONGBOX_BIND_HOST to this machine's Tailscale address (tailscale ip -4)," -ForegroundColor Red
+    Write-Host "  or unset SONGBOX_PERSONAL_MODE." -ForegroundColor Red
+    Write-Host ""
+    exit 1
+}
+
 function Test-DockerRunning {
-    docker info *> $null
-    return $LASTEXITCODE -eq 0
+    # Wrapped in try/catch, not a bare call: with $ErrorActionPreference = "Stop" (set at the top
+    # of this script), PowerShell 5.1 wraps a native command's stderr output in a terminating
+    # NativeCommandError the instant that stream is redirected at all -- even redirected to $null,
+    # even though the command's own actual exit code is all this function cares about. Confirmed
+    # for real: with Docker Desktop not yet running, `docker info` writes its "cannot connect"
+    # message to stderr, and that turned into an uncaught exception that silently killed this
+    # entire script before it ever reached the Docker-Desktop-auto-start logic below -- the exact
+    # case that logic exists to handle. The bug was latent through every earlier run this session
+    # only because Docker already happened to be running each time.
+    try {
+        docker info *> $null
+        return $LASTEXITCODE -eq 0
+    } catch {
+        return $false
+    }
 }
 
 if (-not (Test-DockerRunning)) {
@@ -94,7 +128,16 @@ try {
 Write-Host "Waiting for Postgres to accept connections..."
 $waited = 0
 while ($true) {
-    docker exec songbox-postgres-1 pg_isready -U songbox *> $null
+    # Same try/catch reasoning as Test-DockerRunning above: `docker exec` writes to stderr (not
+    # just a nonzero exit code) when the target container doesn't exist yet or isn't running --
+    # a real possibility on the very first iteration here, right after `docker compose up -d`
+    # returns but before the container has actually started. With $ErrorActionPreference = "Stop"
+    # that stderr write becomes a terminating exception, exactly like the Docker-Desktop check.
+    try {
+        docker exec songbox-postgres-1 pg_isready -U songbox *> $null
+    } catch {
+        $LASTEXITCODE = 1
+    }
     if ($LASTEXITCODE -eq 0) { break }
     if ($waited -ge 60) {
         Write-Error "Postgres did not become ready within 60 seconds."
@@ -112,6 +155,26 @@ try {
         Write-Error "Database migration failed."
         exit 1
     }
+    # Bind address. uvicorn's own default is 127.0.0.1 (loopback only) -- confirmed via `netstat`,
+    # the socket was bound to 127.0.0.1:8000 rather than 0.0.0.0:8000, so the kernel refused every
+    # non-loopback connection, including Tailscale's. That default is kept here, because it is the
+    # right one for plain local dev and fails closed.
+    #
+    # To reach this API from your own other devices, set SONGBOX_BIND_HOST to THIS machine's
+    # Tailscale address (`tailscale ip -4`). Deliberately not 0.0.0.0: binding one specific
+    # address means the kernel will not accept a connection arriving on the Wi-Fi adapter at all,
+    # so reachability is a property of this process rather than of Windows Firewall's opinion
+    # about the current network. Windows stores that opinion per network *profile*, not per
+    # adapter -- so with 0.0.0.0 the day this laptop joins a network Windows classifies Private,
+    # ports open to that whole LAN, where unauthenticated signup plus SONGBOX_PERSONAL_MODE's
+    # unenforced rights gate are waiting. One narrower bind removes that entire failure mode.
+    #
+    # Tradeoff, deliberate: while bound to the Tailscale address, http://localhost:8000 no longer
+    # answers on this machine -- use the Tailscale address from here too (it works locally). If
+    # Tailscale is down, the bind fails immediately and loudly rather than quietly falling back to
+    # something more exposed.
+    Write-Host "Binding API to $bindHost`:8000"
+    #
     # --reload: without it, backend code changes require killing and restarting this whole script
     # to take effect -- a real, repeated source of confusion during development (a new/changed
     # endpoint silently 404s or serves stale behavior until someone remembers to restart). Known
@@ -119,7 +182,7 @@ try {
     # chain can take minutes on a real song), a file save that triggers a reload mid-request will
     # kill that in-flight request -- standard behavior for any hot-reloading dev server, not worth
     # avoiding --reload over.
-    & $python -m uvicorn app.main:app --port 8000 --reload
+    & $python -m uvicorn app.main:app --host $bindHost --port 8000 --reload
 } finally {
     Pop-Location
 }
